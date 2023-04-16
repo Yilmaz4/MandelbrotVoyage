@@ -7,7 +7,7 @@ The Mandelbrot set is calculated in real time as you zoom in/out or move the set
 
 ![](https://github.com/Yilmaz4/MandelbrotVoyage/blob/main/ezgif-4-23ea85e69c.gif)
 
-The most you can zoom in is 10^14 due to the limiations of floating point numbers. I do plan to 
+The most you can zoom in is 10^14 due to the limiations of floating point numbers. I do plan to use a library to increase the precision but I'm kind of a slow learner...
 
 System requirements:
 
