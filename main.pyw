@@ -67,7 +67,7 @@ class MandelbrotExplorer(Tk):
         self.display.place(x=0, y=780, width=800)
 
         self.cmap = "hot"
-        self.use_lod = False
+        self.use_lod = BooleanVar(value=True)
 
         self.update_image()
 
@@ -89,6 +89,13 @@ class MandelbrotExplorer(Tk):
                         self.add_command(label="Take screenshot", accelerator="Ctrl+S", state="disabled")
                         self.add_separator()
                         self.add_command(label="Exit", accelerator="Alt+F4", command=exit)
+
+                class settingsMenu(Menu):
+                    def __init__(self, master: menuBar):
+                        super().__init__(master, tearoff=0)
+                        self.root = self.master.master
+                        
+                        self.add_checkbutton(label="Load low resolution first", variable=self.root.use_lod)
                 
                 class colorMenu(Menu):
                     def __init__(self, master: menuBar):
@@ -102,11 +109,13 @@ class MandelbrotExplorer(Tk):
                         root.cmap = self.cmap.get()
                         root.update_image()
 
-                self.colorMenu = colorMenu(self)
+                
                 self.fileMenu = fileMenu(self)
+                self.settingsMenu = settingsMenu(self)
+                self.colorMenu = colorMenu(self)
 
                 self.add_cascade(label = "File", menu=self.fileMenu)
-                self.add_command(label = "Settings", state="disabled")
+                self.add_cascade(label = "Settings", menu=self.settingsMenu)
                 self.add_cascade(label = "Color Scheme", menu=self.colorMenu)
                 self.add_command(label = "Help", state="disabled")
 
@@ -149,7 +158,7 @@ class MandelbrotExplorer(Tk):
             self.zoom /= 0.9
             self.max_iters = max(10, int(self.max_iters / 1.05))
 
-        if self.use_lod:
+        if self.use_lod.get():
             self.load_lod()
             self.load_image = self.after(1000, self.update_image)
         else:
@@ -176,7 +185,7 @@ class MandelbrotExplorer(Tk):
                 self.offset -= np.array([dx / self.fig.get_dpi() / w * self.zoom, dy / self.fig.get_dpi() / h * self.zoom], dtype=np.float64)
                 self.last_x, self.last_y = event.x, event.y
 
-                if self.use_lod:
+                if self.use_lod.get():
                     self.load_lod()
                     self.load_image = self.after(1000, self.update_image)
                 else:
