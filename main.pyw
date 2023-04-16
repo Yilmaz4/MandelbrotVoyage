@@ -1,5 +1,6 @@
 from tkinter import *
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
 from matplotlib.figure import Figure
 import numpy as np
 import nvidia_smi
@@ -38,6 +39,8 @@ class MandelbrotExplorer(Tk):
         self.wm_geometry("800x800")
         self.wm_resizable(width=False, height=False)
 
+        self.size = 800
+
         self.fig = Figure()
         self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
         self.ax = self.fig.add_subplot(111)
@@ -48,7 +51,7 @@ class MandelbrotExplorer(Tk):
         self.zoom = 4.5
         self.max_iters = 150
         self.image_lod = np.zeros((200, 200), dtype=np.float32)
-        self.image = np.zeros((800, 800), dtype=np.float64)
+        self.image = np.zeros((self.size, self.size), dtype=np.float64)
         self.image_gpu = cuda.to_device(self.image)
         self.image_gpu_lod = cuda.to_device(self.image_lod)
 
@@ -72,6 +75,7 @@ class MandelbrotExplorer(Tk):
         self.update_image()
 
         self.dragging = False
+        self.double_click = False
         self.last_x, self.last_y = None, None
 
         class menuBar(Menu):
@@ -148,6 +152,17 @@ class MandelbrotExplorer(Tk):
         
         self.load_image = None
 
+    def center_point(self, event):
+        dx = (event.x - self.size / 2) / 2
+        dy = (self.size / 2 - event.y) / 2
+
+        w, h = self.ax.get_xlim()[1] - self.ax.get_xlim()[0], self.ax.get_ylim()[1] - self.ax.get_ylim()[0]
+        self.offset -= np.array([dy / self.fig.get_dpi() / w * self.zoom, dx / self.fig.get_dpi() / h * self.zoom], dtype=np.float64)
+        self.last_x, self.last_y = event.x, event.y
+        
+        self.update_image()
+
+
     def _on_mousewheel(self, event):
         if self.load_image:
             self.after_cancel(self.load_image)
@@ -163,9 +178,17 @@ class MandelbrotExplorer(Tk):
             self.load_image = self.after(1000, self.update_image)
         else:
             self.update_image()
+
+    def reset_double_click(self):
+        self.double_click = False
     
     def _on_button_press(self, event):
         if event.button == 1:
+            if self.double_click:
+                self.center_point(event)
+            else:
+                self.double_click = True
+                self.after(500, self.reset_double_click)
             self.dragging = True
             self.last_x, self.last_y = event.x, event.y
 
@@ -179,10 +202,10 @@ class MandelbrotExplorer(Tk):
             if self.load_image:
                 self.after_cancel(self.load_image)
             if self.last_x is not None and self.last_y is not None:
-                dy = -(event.x - self.last_x)
-                dx = -(self.last_y - event.y)
+                dx = -(event.x - self.last_x)
+                dy = -(self.last_y - event.y)
                 w, h = self.ax.get_xlim()[1] - self.ax.get_xlim()[0], self.ax.get_ylim()[1] - self.ax.get_ylim()[0]
-                self.offset -= np.array([dx / self.fig.get_dpi() / w * self.zoom, dy / self.fig.get_dpi() / h * self.zoom], dtype=np.float64)
+                self.offset -= np.array([dy / self.fig.get_dpi() / w * self.zoom, dx / self.fig.get_dpi() / h * self.zoom], dtype=np.float64)
                 self.last_x, self.last_y = event.x, event.y
 
                 if self.use_lod.get():
