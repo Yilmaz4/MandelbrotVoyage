@@ -6,3 +6,11 @@ Mandelbrot Voyage is a yet another program where you can locally explore the Man
 The Mandelbrot set is calculated in real time as you zoom in/out or move the set around. The following video was recorded with an RTX 3070 and Ryzen 7 5800X.
 
 ![](https://github.com/Yilmaz4/MandelbrotVoyage/blob/main/ezgif-4-23ea85e69c.gif)
+
+The most you can zoom in is 10^14 due to the limiations of floating point numbers. I do plan to 
+
+System requirements:
+
+- A CUDA compatible GPU (so only NVIDIA GPUs for now, I don't have an AMD GPU to test with)
+
+- Minimum 200 MB VRAM
