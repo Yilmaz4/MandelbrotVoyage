@@ -122,11 +122,6 @@ class MandelbrotExplorer(Tk):
         self.display.configure(text="Zoom: " + f"{(4.5 / self.zoom):e}" + "   Iterations: " + f"{self.max_iters:e}" + "   GPU Usage: " + str(util.gpu) + "%   Memory Usage: " + str(int(mem.used / 1048576)) + " MB")
     
         self.after(1000, self.update_info)
-    def pixel_to_complex(self, x, y):
-        w, h = self.ax.get_xlim()[1] - self.ax.get_xlim()[0], self.ax.get_ylim()[1] - self.ax.get_ylim()[0]
-        real = self.offset[0] + (x / self.fig.get_dpi() / w - 0.5) * self.zoom
-        imag = self.offset[1] + (y / self.fig.get_dpi() / h - 0.5) * self.zoom
-        return real, imag
 
     def load_lod(self):
         mandelbrot_kernel[(32, 32), (8, 8)](self.zoom, self.offset, self.max_iters, self.image_gpu_lod)
