@@ -1,5 +1,6 @@
 from tkinter import *
 from tkinter import filedialog
+from tkinter.ttk import *
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
@@ -10,8 +11,9 @@ from datetime import datetime
 from math import *
 
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import numpy as np
-import nvidia_smi
+import nvidia_smi, cv2, tkinter
 
 cmaps = ['CMRmap','Greys_r','RdGy_r','afmhot','binary_r','bone','copper','cubehelix','flag_r','gist_earth','gist_gray','gist_heat','gist_stern','gist_yarg_r','gnuplot','gnuplot2','gray','hot','inferno','magma','nipy_spectral']
 
@@ -72,7 +74,7 @@ class MandelbrotExplorer(Tk):
 
         self.handle = nvidia_smi.nvmlDeviceGetHandleByIndex(0)
 
-        self.display = Label(self, bg="black", fg="white")
+        self.display = tkinter.Label(self, bg="black", fg="white")
         self.update_info()
         self.display.place(x=0, y=self.size - 20, width=self.size)
 
@@ -101,6 +103,8 @@ class MandelbrotExplorer(Tk):
                         self.add_command(label="Load location", accelerator="Ctrl+L", command=self.root.load_loc)
                         self.add_separator()
                         self.add_command(label="Take screenshot", accelerator="Ctrl+S", command=self.root.save_image)
+                        self.add_separator()
+                        self.add_command(label="Create zoom video", command=self.root.make_video)
                         self.add_separator()
                         self.add_command(label="Exit", accelerator="Alt+F4", command=exit)
 
@@ -155,6 +159,148 @@ class MandelbrotExplorer(Tk):
 
         self.after(1000, self.update_info)
 
+    def make_video(self):
+        class Video(Toplevel):
+            def __init__(self, master: Tk):
+                super().__init__(master)
+
+                self.root = master
+
+                self.duration = IntVar(value=10)
+                self.fps = IntVar(value=30)
+                self.resolution = IntVar(value=800)
+
+                self.duration.trace("w", lambda *args: self.on_durationSpinbox_change())
+
+                self.wm_title("Make zoom video")
+                self.wm_geometry(f"529x400")
+                self.wm_resizable(height=False, width=False)
+
+                self.destionationLabel = Label(self, text="Destionation:")
+                self.destionationEntry = Entry(self, width=45)
+                self.destionationBrowseButton = Button(self, text="Browse...", width=18, command=self.ask_destionation)
+
+                self.tempFolderLabel = Label(self, text="Temporary Folder:")
+                self.tempFolderEntry = Entry(self, width=45)
+                self.tempFolderBrowseButton = Button(self, text="Browse...", width=18, command=self.ask_tempfolder)
+
+                self.durationLabel = Label(self, text="Duration:")
+                self.durationSpinbox = Spinbox(self, width=10, textvariable=self.duration, increment=1, from_=0, to=240, validate="key", validatecommand=(self.register(self.validate_durationSpinbox), "%P"))
+                self.durationUnitLabel = Label(self, text="seconds", foreground="gray")
+                self.fpsLabel = Label(self, text="FPS:")
+                self.fpsSpinbox = Spinbox(self, width=10, textvariable=self.fps, increment=1, from_=0, to=60, validate="key", validatecommand=(self.register(self.validate_durationSpinbox), "%P"))
+                self.resolutionLabel = Label(self, text="Resolution:")
+                self.resolutionSpinbox = Spinbox(self, width=10, textvariable=self.resolution, increment=1, from_=0, to=8000, validate="key", validatecommand=(self.register(self.validate_durationSpinbox), "%P"), command=lambda: self.resolutionUnitLabel.configure(text=f"x{self.resolutionSpinbox.get()}"))
+                self.resolutionUnitLabel = Label(self, text="x800", foreground="gray")
+
+                self.separator1 = Separator(self, orient="horizontal")
+
+                z = self.duration.get()
+                x = np.linspace(0, z, 1000)
+
+                self.fig1, self.ax1 = plt.subplots(figsize=(6, 4), facecolor="#f0f0f0")
+                self.ax1.plot(x, self.velocity(x, z))
+                self.ax1.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
+                self.ax1.set_title(f'Zoom Velocity', fontsize=9)
+                self.ax1.grid(True)
+
+                self.canvas1 = FigureCanvasTkAgg(self.fig1, master=self)
+                self.canvas1.draw()
+                self.canvas1.get_tk_widget().place(x=210, y=70, height=185, width=165)
+
+
+                self.fig2, self.ax2 = plt.subplots(figsize=(6, 4), facecolor="#f0f0f0")
+                self.ax2.plot(x, self.derivative(x, z))
+                self.ax2.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
+                self.ax2.set_title(f'Zoom Acceleration', fontsize=9)
+                self.ax2.grid(True)
+
+                self.canvas2 = FigureCanvasTkAgg(self.fig2, master=self)
+                self.canvas2.draw()
+                self.canvas2.get_tk_widget().place(x=365, y=70, height=185, width=165)
+
+                self.zeroLabel = Label(self, text="0")
+                self.zeroLabel.place(x=368, y=145)
+
+                self.destionationLabel.place(x=10, y=8)
+                self.destionationEntry.place(x=115, y=7)
+                self.destionationBrowseButton.place(x=400, y=5)
+
+                self.tempFolderLabel.place(x=10, y=38)
+                self.tempFolderEntry.place(x=115, y=37)
+                self.tempFolderBrowseButton.place(x=400, y=35)
+
+                self.durationLabel.place(x=19, y=68)
+                self.durationSpinbox.place(x=78, y=67)
+                self.durationUnitLabel.place(x=160, y=68)
+                self.fpsLabel.place(x=47, y=98)
+                self.fpsSpinbox.place(x=78, y=97)
+                self.resolutionLabel.place(x=10, y=128)
+                self.resolutionSpinbox.place(x=78, y=127)
+                self.resolutionUnitLabel.place(x=160, y=128)
+
+                self.separator1.place(x=13, y=158, width=192)
+
+                self.focus_force()
+                self.transient(master)
+                self.mainloop()
+
+            @staticmethod
+            def sigmoid_derivative(x, x0, k):
+                return k * np.exp(-k * (x - x0)) / (1 + np.exp(-k * (x - x0))) ** 2
+            @staticmethod
+            def sigmoid(x, x0, k):
+                return 1 / (1 + np.exp(-k * (x-x0)))
+            
+            @classmethod
+            def velocity(cls, x, z):
+                y1_1 = cls.sigmoid(x, z / 20, 0.7)
+                y2_1 = cls.sigmoid(x, z - z / 20, -0.7)
+                return y1_1 + y2_1
+            @classmethod
+            def derivative(cls, x, z):
+                y1_2 = cls.sigmoid_derivative(x, z / 20, 0.7)
+                y2_2 = cls.sigmoid_derivative(x, z - z / 20, -0.7)
+                return y1_2 + y2_2
+
+            def on_durationSpinbox_change(self):
+                z = self.duration.get()
+                x = np.linspace(0, z, 1000)
+                self.ax1.clear()
+                self.ax2.clear()
+
+                self.ax1.plot(x, self.velocity(x, z))
+                self.ax1.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
+                self.ax1.set_title(f'Zoom Velocity', fontsize=9)
+                self.ax1.grid(True)
+
+                self.ax2.plot(x, self.derivative(x, z))
+                self.ax2.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
+                self.ax2.set_title(f'Zoom Acceleration', fontsize=9)
+                self.ax2.grid(True)
+
+                self.canvas1.draw()
+                self.canvas2.draw()
+
+            def validate_durationSpinbox(self, new_value: str):
+                if new_value.isdigit():
+                    return True
+                elif new_value == "":
+                    return True
+                else:
+                    return False
+
+            def ask_destionation(self):
+                path = filedialog.asksaveasfilename(parent=self, initialfile=datetime.now().strftime("Mandelbrot Voyage %H:%M:%S %d-%m-%y"), defaultextension='.mp4', filetypes=[('MP4 (*.mp4)', '*.mp4'), ('AVI (*.avi)', '*.avi')], title="Save the video")
+                if path:
+                    self.destionationEntry.insert(0, path)
+            def ask_tempfolder(self):
+                path = filedialog.askdirectory(parent=self, title="Choose a temporary folder to extract frames")
+                if path:
+                    self.tempFolderEntry.insert(0, path)
+            
+        video = Video(self)
+
     def update_info(self):
         util = nvidia_smi.nvmlDeviceGetUtilizationRates(self.handle)
         mem = nvidia_smi.nvmlDeviceGetMemoryInfo(self.handle)
@@ -180,7 +326,7 @@ class MandelbrotExplorer(Tk):
         self.load_image = None
 
     def save_image(self):
-        path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage %H:%M:%S %d-%m-%y"), defaultextension='.png', filetypes=[('PNG (*.png)', '*.png'), ('JPEG (*.jpg)', '*.jpg')], title="Save the screenshot")
+        path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage %H.%M.%S %d-%m-%y"), defaultextension='.png', filetypes=[('PNG (*.png)', '*.png'), ('JPEG (*.jpg)', '*.jpg')], title="Save the screenshot")
         if not path:
             return
         plt.imsave(path, self.image, cmap=self.cmap)
