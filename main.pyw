@@ -1,10 +1,17 @@
 from tkinter import *
+from tkinter import filedialog
+
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
 from matplotlib.figure import Figure
+
+from numba import cuda
+from datetime import datetime
+from math import *
+
+import matplotlib.pyplot as plt
 import numpy as np
 import nvidia_smi
-from numba import cuda
 
 cmaps = ['CMRmap','Greys_r','RdGy_r','afmhot','binary_r','bone','copper','cubehelix','flag_r','gist_earth','gist_gray','gist_heat','gist_stern','gist_yarg_r','gnuplot','gnuplot2','gray','hot','inferno','magma','nipy_spectral']
 
@@ -35,11 +42,11 @@ class MandelbrotExplorer(Tk):
     def __init__(self):
         super().__init__()
 
-        self.wm_title("Mandelbrot Voyage")
-        self.wm_geometry("800x800")
-        self.wm_resizable(width=False, height=False)
-
         self.size = 800
+
+        self.wm_title("Mandelbrot Voyage")
+        self.wm_geometry(f"{self.size}x{self.size}")
+        self.wm_resizable(width=False, height=False)
 
         self.fig = Figure()
         self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
@@ -50,7 +57,7 @@ class MandelbrotExplorer(Tk):
         self.offset = np.array([0, 0], dtype=np.float64)
         self.zoom = 4.5
         self.max_iters = 150
-        self.image_lod = np.zeros((200, 200), dtype=np.float32)
+        self.image_lod = np.zeros((200, 200), dtype=np.float64)
         self.image = np.zeros((self.size, self.size), dtype=np.float64)
         self.image_gpu = cuda.to_device(self.image)
         self.image_gpu_lod = cuda.to_device(self.image_lod)
@@ -65,18 +72,21 @@ class MandelbrotExplorer(Tk):
 
         self.handle = nvidia_smi.nvmlDeviceGetHandleByIndex(0)
 
-        self.display = Label(self, text="", bg="black", fg="white")
+        self.display = Label(self, bg="black", fg="white")
         self.update_info()
-        self.display.place(x=0, y=780, width=800)
+        self.display.place(x=0, y=self.size - 20, width=self.size)
 
-        self.cmap = "hot"
-        self.use_lod = BooleanVar(value=True)
+        self.cmap = "CMRmap"
+        self.use_lod = BooleanVar(value=False)
 
         self.update_image()
 
         self.dragging = False
         self.double_click = False
         self.last_x, self.last_y = None, None
+
+        self.zoom_m1 = None
+        self.offset_m1 = None
 
         class menuBar(Menu):
             def __init__(self, root):
@@ -87,10 +97,10 @@ class MandelbrotExplorer(Tk):
                         super().__init__(master, tearoff=0)
                         self.root = self.master.master
                         
-                        self.add_command(label="Save coordinates", accelerator="Ctrl+C", state="disabled")
-                        self.add_command(label="Load coordinates", accelerator="Ctrl+L", state="disabled")
+                        self.add_command(label="Save location", accelerator="Ctrl+C", command=self.root.save_loc)
+                        self.add_command(label="Load location", accelerator="Ctrl+L", command=self.root.load_loc)
                         self.add_separator()
-                        self.add_command(label="Take screenshot", accelerator="Ctrl+S", state="disabled")
+                        self.add_command(label="Take screenshot", accelerator="Ctrl+S", command=self.root.save_image)
                         self.add_separator()
                         self.add_command(label="Exit", accelerator="Alt+F4", command=exit)
 
@@ -100,6 +110,16 @@ class MandelbrotExplorer(Tk):
                         self.root = self.master.master
                         
                         self.add_checkbutton(label="Load low resolution first", variable=self.root.use_lod)
+
+                class zoomMenu(Menu):
+                    def __init__(self, master: menuBar):
+                        super().__init__(master, tearoff=0)
+                        self.root = self.master.master
+
+                        self.add_command(label="Zoom in",  accelerator="E", command=lambda: self.root.zoom_(+1))
+                        self.add_command(label="Zoom out", accelerator="Q", command=lambda: self.root.zoom_(-1))
+                        self.add_separator()
+                        self.add_command(label="Reset zoom", accelerator="R", command=self.root.reset_zoom)
                 
                 class colorMenu(Menu):
                     def __init__(self, master: menuBar):
@@ -116,15 +136,22 @@ class MandelbrotExplorer(Tk):
                 
                 self.fileMenu = fileMenu(self)
                 self.settingsMenu = settingsMenu(self)
+                self.zoomMenu = zoomMenu(self)
                 self.colorMenu = colorMenu(self)
 
                 self.add_cascade(label = "File", menu=self.fileMenu)
                 self.add_cascade(label = "Settings", menu=self.settingsMenu)
+                self.add_cascade(label = "Zoom", menu=self.zoomMenu)
                 self.add_cascade(label = "Color Scheme", menu=self.colorMenu)
                 self.add_command(label = "Help", state="disabled")
 
         self.menuBar = menuBar(self)
         self.config(menu = self.menuBar)
+
+        self.bind("e", lambda _: self.zoom_(+1))
+        self.bind("q", lambda _: self.zoom_(-1))
+        self.bind("r", lambda _: self.reset_zoom())
+        self.bind("<Control_L>s", lambda _: self.save_image())
 
         self.after(1000, self.update_info)
 
@@ -137,20 +164,36 @@ class MandelbrotExplorer(Tk):
         self.after(1000, self.update_info)
 
     def load_lod(self):
-        mandelbrot_kernel[(32, 32), (8, 8)](self.zoom, self.offset, self.max_iters, self.image_gpu_lod)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu_lod)
         self.image_gpu_lod.copy_to_host(self.image_lod)
         self.ax.clear()
         self.ax.imshow(self.image_lod, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
         self.canvas.draw()
 
     def update_image(self):
-        mandelbrot_kernel[(32, 32), (8, 8)](self.zoom, self.offset, self.max_iters, self.image_gpu)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu)
         self.image_gpu.copy_to_host(self.image)
         self.ax.clear()
         self.ax.imshow(self.image, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
         self.canvas.draw()
         
         self.load_image = None
+
+    def save_image(self):
+        path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage %H:%M:%S %d-%m-%y"), defaultextension='.png', filetypes=[('PNG (*.png)', '*.png'), ('JPEG (*.jpg)', '*.jpg')], title="Save the screenshot")
+        if not path:
+            return
+        plt.imsave(path, self.image, cmap=self.cmap)
+
+    def save_loc(self):
+        self.zoom_m1 = self.zoom
+        self.offset_m1 = self.offset.copy()
+
+    def load_loc(self):
+        self.zoom = self.zoom_m1
+        self.offset = self.offset_m1.copy()
+        self.max_iters = 150 * 1.1 ** int(np.emath.logn(0.9, self.zoom / 4.5))
+        self.update_image()
 
     def center_point(self, event):
         dx = (event.x - self.size / 2) / 2
@@ -162,22 +205,29 @@ class MandelbrotExplorer(Tk):
         
         self.update_image()
 
-
-    def _on_mousewheel(self, event):
+    def zoom_(self, delta):
         if self.load_image:
             self.after_cancel(self.load_image)
-        if event.delta > 0:
+        if delta > 0:
             self.zoom *= 0.9
-            self.max_iters = int(self.max_iters * 1.05)
+            self.max_iters = int(self.max_iters * 1.1)
         else:
             self.zoom /= 0.9
-            self.max_iters = max(10, int(self.max_iters / 1.05))
+            self.max_iters = max(10, int(self.max_iters / 1.1))
 
         if self.use_lod.get():
             self.load_lod()
             self.load_image = self.after(1000, self.update_image)
         else:
             self.update_image()
+
+    def reset_zoom(self):
+        self.zoom = 4.5
+        self.max_iters = 150
+        self.update_image()
+
+    def _on_mousewheel(self, event):
+        self.zoom_(event.delta)
 
     def reset_double_click(self):
         self.double_click = False
