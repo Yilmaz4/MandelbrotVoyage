@@ -11,6 +11,6 @@ The most you can zoom in is 10^14 due to the limiations of floating point number
 
 System requirements:
 
-- A CUDA compatible GPU (so only NVIDIA GPUs for now, I don't have an AMD GPU to test with)
+- A CUDA Compute Capability >3.5 GPU
 
 - Minimum 200 MB VRAM
