@@ -13,7 +13,7 @@ from math import *
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import numpy as np
-import nvidia_smi, cv2, tkinter
+import nvidia_smi, cv2, tkinter, tempfile
 
 cmaps = ['CMRmap','Greys_r','RdGy_r','afmhot','binary_r','bone','copper','cubehelix','flag_r','gist_earth','gist_gray','gist_heat','gist_stern','gist_yarg_r','gnuplot','gnuplot2','gray','hot','inferno','magma','nipy_spectral']
 
@@ -48,20 +48,23 @@ class MandelbrotExplorer(Tk):
 
         self.wm_title("Mandelbrot Voyage")
         self.wm_geometry(f"{self.size}x{self.size}")
-        self.wm_resizable(width=False, height=False)
+        self.configure(bg="black")
+        # self.wm_resizable(width=False, height=False)
+
+        self.width, self.height = self.size, self.size
 
         self.fig = Figure()
         self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-        self.ax = self.fig.add_subplot(111)
+        self.ax = self.fig.add_subplot(111, aspect=1)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.draw()
-        self.canvas.get_tk_widget().place(x=0, y=0, height=800, width=800)
+        self.canvas.get_tk_widget().place(x=0, y=0, height=self.size, width=self.size)
         self.offset = np.array([0, 0], dtype=np.float64)
         self.zoom = 4.5
         self.max_iters = 150
-        self.image_lod = np.zeros((200, 200), dtype=np.float64)
-        self.image = np.zeros((self.size, self.size), dtype=np.float64)
+        self.image = np.zeros((self.height, self.width), dtype=np.float64)
         self.image_gpu = cuda.to_device(self.image)
+        self.image_lod = np.zeros((int(self.height / 4), int(self.width / 4)), dtype=np.float64)
         self.image_gpu_lod = cuda.to_device(self.image_lod)
 
         self.load_image = None
@@ -76,7 +79,7 @@ class MandelbrotExplorer(Tk):
 
         self.display = tkinter.Label(self, bg="black", fg="white")
         self.update_info()
-        self.display.place(x=0, y=self.size - 20, width=self.size)
+        self.display.place(relx=0.5, rely=1.0, anchor=S, width=self.width)
 
         self.cmap = "CMRmap"
         self.use_lod = BooleanVar(value=False)
@@ -85,8 +88,9 @@ class MandelbrotExplorer(Tk):
 
         self.dragging = False
         self.double_click = False
+        self.resize = None
         self.last_x, self.last_y = None, None
-
+        self.halt_on_resize = False
         self.zoom_m1 = None
         self.offset_m1 = None
 
@@ -156,8 +160,36 @@ class MandelbrotExplorer(Tk):
         self.bind("q", lambda _: self.zoom_(-1))
         self.bind("r", lambda _: self.reset_zoom())
         self.bind("<Control_L>s", lambda _: self.save_image())
+        self.bind("<F11>", lambda _: self.wm_attributes('-fullscreen', not self.attributes('-fullscreen')))
+
+        self.wm_protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.bind("<Configure>", self.on_resize)
 
         self.after(1000, self.update_info)
+
+    def on_close(self):
+        self.destroy()
+        self.quit()
+        exit()
+
+    def on_resize(self, event):
+        if (event.widget == self and (self.width != event.width or self.height != event.height)):
+            if self.resize:
+                self.after_cancel(self.resize)
+            self.height, self.width = event.height, event.width
+            self.resize = self.after(100, self.adjust_for_resize)
+
+    def adjust_for_resize(self):
+        self.resize = None
+        self.canvas.get_tk_widget().place_forget()
+        self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
+        self.image = np.zeros((self.height, self.width), dtype=np.float64)
+        self.image_gpu = cuda.to_device(self.image)
+        self.image_lod = np.zeros((int(self.height / 4), int(self.width / 4)), dtype=np.float64)
+        self.image_gpu_lod = cuda.to_device(self.image_lod)
+        self.ax.set_aspect(self.height / self.width)
+        self.update_image()
 
     def make_video(self):
         class Video(Toplevel):
@@ -170,10 +202,12 @@ class MandelbrotExplorer(Tk):
                 self.fps = IntVar(value=30)
                 self.resolution = IntVar(value=800)
 
+                self.tempFolder = StringVar(value=tempfile.gettempdir() + "\\Mandelbrot Voyage")
+
                 self.duration.trace("w", lambda *args: self.on_durationSpinbox_change())
 
                 self.wm_title("Make zoom video")
-                self.wm_geometry(f"529x400")
+                self.wm_geometry(f"532x400")
                 self.wm_resizable(height=False, width=False)
 
                 self.destionationLabel = Label(self, text="Destionation:")
@@ -181,7 +215,7 @@ class MandelbrotExplorer(Tk):
                 self.destionationBrowseButton = Button(self, text="Browse...", width=18, command=self.ask_destionation)
 
                 self.tempFolderLabel = Label(self, text="Temporary Folder:")
-                self.tempFolderEntry = Entry(self, width=45)
+                self.tempFolderEntry = Entry(self, width=45, textvariable=self.tempFolder)
                 self.tempFolderBrowseButton = Button(self, text="Browse...", width=18, command=self.ask_tempfolder)
 
                 self.durationLabel = Label(self, text="Duration:")
@@ -195,19 +229,22 @@ class MandelbrotExplorer(Tk):
 
                 self.separator1 = Separator(self, orient="horizontal")
 
+                self.endLocLabel = Label(self, text="Destination:")
+                self.endLocEntry = Entry(self, width=20)
+                self.endLocBrowseButton = Button(self, text="Browse...", width=15)
+
                 z = self.duration.get()
                 x = np.linspace(0, z, 1000)
 
                 self.fig1, self.ax1 = plt.subplots(figsize=(6, 4), facecolor="#f0f0f0")
                 self.ax1.plot(x, self.velocity(x, z))
-                self.ax1.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
+                self.ax1.tick_params(labelbottom=True, labelleft=True, labelright=False, labeltop=False)
                 self.ax1.set_title(f'Zoom Velocity', fontsize=9)
                 self.ax1.grid(True)
 
                 self.canvas1 = FigureCanvasTkAgg(self.fig1, master=self)
                 self.canvas1.draw()
                 self.canvas1.get_tk_widget().place(x=210, y=70, height=185, width=165)
-
 
                 self.fig2, self.ax2 = plt.subplots(figsize=(6, 4), facecolor="#f0f0f0")
                 self.ax2.plot(x, self.derivative(x, z))
@@ -218,9 +255,6 @@ class MandelbrotExplorer(Tk):
                 self.canvas2 = FigureCanvasTkAgg(self.fig2, master=self)
                 self.canvas2.draw()
                 self.canvas2.get_tk_widget().place(x=365, y=70, height=185, width=165)
-
-                self.zeroLabel = Label(self, text="0")
-                self.zeroLabel.place(x=368, y=145)
 
                 self.destionationLabel.place(x=10, y=8)
                 self.destionationEntry.place(x=115, y=7)
@@ -240,6 +274,9 @@ class MandelbrotExplorer(Tk):
                 self.resolutionUnitLabel.place(x=160, y=128)
 
                 self.separator1.place(x=13, y=158, width=192)
+
+                self.endLocLabel.place(x=10, y=162)
+                self.endLocEntry.place(x=80, y=161)
 
                 self.focus_force()
                 self.transient(master)
@@ -270,7 +307,7 @@ class MandelbrotExplorer(Tk):
                 self.ax2.clear()
 
                 self.ax1.plot(x, self.velocity(x, z))
-                self.ax1.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
+                self.ax1.tick_params(labelbottom=True, labelleft=True, labelright=False, labeltop=False)
                 self.ax1.set_title(f'Zoom Velocity', fontsize=9)
                 self.ax1.grid(True)
 
@@ -310,10 +347,11 @@ class MandelbrotExplorer(Tk):
         self.after(1000, self.update_info)
 
     def load_lod(self):
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu_lod)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters * 0.5, self.image_gpu_lod)
         self.image_gpu_lod.copy_to_host(self.image_lod)
         self.ax.clear()
         self.ax.imshow(self.image_lod, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
+        self.ax.set_aspect(self.height / self.width)
         self.canvas.draw()
 
     def update_image(self):
@@ -321,6 +359,9 @@ class MandelbrotExplorer(Tk):
         self.image_gpu.copy_to_host(self.image)
         self.ax.clear()
         self.ax.imshow(self.image, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
+        self.ax.set_aspect(self.height / self.width)
+        self.ax.axhline(y=0, color='green')
+        self.ax.axvline(x=-0.5, color='green')
         self.canvas.draw()
         
         self.load_image = None
@@ -342,13 +383,18 @@ class MandelbrotExplorer(Tk):
         self.update_image()
 
     def center_point(self, event):
-        dx = (event.x - self.size / 2) / 2
-        dy = (self.size / 2 - event.y) / 2
+        dx = (event.x - self.width / 2) / self.width
+        dy = (self.height / 2 - event.y) / self.height
 
-        w, h = self.ax.get_xlim()[1] - self.ax.get_xlim()[0], self.ax.get_ylim()[1] - self.ax.get_ylim()[0]
-        self.offset -= np.array([dy / self.fig.get_dpi() / w * self.zoom, dx / self.fig.get_dpi() / h * self.zoom], dtype=np.float64)
+        # adjust the offset based on the aspect ratio
+        if self.width > self.height:
+            aspect_ratio = self.width / self.height
+            self.offset -= np.array([dy * self.zoom, dx * self.zoom * aspect_ratio], dtype=np.float64)
+        else:
+            aspect_ratio = self.height / self.width
+            self.offset -= np.array([dy * self.zoom * aspect_ratio, dx * self.zoom], dtype=np.float64)
+
         self.last_x, self.last_y = event.x, event.y
-        
         self.update_image()
 
     def zoom_(self, delta):
