@@ -360,8 +360,6 @@ class MandelbrotExplorer(Tk):
         self.ax.clear()
         self.ax.imshow(self.image, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
-        self.ax.axhline(y=0, color='green')
-        self.ax.axvline(x=-0.5, color='green')
         self.canvas.draw()
         
         self.load_image = None
