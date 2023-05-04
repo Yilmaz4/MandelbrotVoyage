@@ -61,7 +61,7 @@ class MandelbrotExplorer(Tk):
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.size, width=self.size)
         self.offset = np.array([0, 0], dtype=np.float64)
         self.zoom = 4.5
-        self.max_iters = 150
+        self.max_iters = 80
         self.image = np.zeros((self.height, self.width), dtype=np.float64)
         self.image_gpu = cuda.to_device(self.image)
         self.image_lod = np.zeros((int(self.height / 4), int(self.width / 4)), dtype=np.float64)
@@ -400,10 +400,10 @@ class MandelbrotExplorer(Tk):
             self.after_cancel(self.load_image)
         if delta > 0:
             self.zoom *= 0.9
-            self.max_iters = int(self.max_iters * 1.1)
+            self.max_iters = int(self.max_iters * 1.05)
         else:
             self.zoom /= 0.9
-            self.max_iters = max(10, int(self.max_iters / 1.1))
+            self.max_iters = max(10, int(self.max_iters / 1.05))
 
         if self.use_lod.get():
             self.load_lod()
