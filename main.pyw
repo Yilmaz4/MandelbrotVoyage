@@ -191,6 +191,19 @@ class MandelbrotExplorer(Tk):
         self.ax.set_aspect(self.height / self.width)
         self.update_image()
 
+    def render_video(self):
+        self.zoom = 4.5
+        self.max_iters = 150
+
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu)
+        self.image_gpu.copy_to_host(self.image)
+        self.ax.clear()
+        self.ax.imshow(self.image, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
+        self.ax.set_aspect(self.height / self.width)
+        self.canvas.draw()
+        
+        self.load_image = None
+
     def make_video(self):
         class Video(Toplevel):
             def __init__(self, master: Tk):
@@ -232,6 +245,8 @@ class MandelbrotExplorer(Tk):
                 self.endLocLabel = Label(self, text="Destination:")
                 self.endLocEntry = Entry(self, width=20)
                 self.endLocBrowseButton = Button(self, text="Browse...", width=15)
+
+                self.renderButton = Button(self, text="Render video", width=31, command=self.root.render_video)
 
                 z = self.duration.get()
                 x = np.linspace(0, z, 1000)
@@ -277,6 +292,8 @@ class MandelbrotExplorer(Tk):
 
                 self.endLocLabel.place(x=10, y=162)
                 self.endLocEntry.place(x=80, y=161)
+                
+                self.renderButton.place(x=10, y=188)
 
                 self.focus_force()
                 self.transient(master)
@@ -287,7 +304,7 @@ class MandelbrotExplorer(Tk):
                 return k * np.exp(-k * (x - x0)) / (1 + np.exp(-k * (x - x0))) ** 2
             @staticmethod
             def sigmoid(x, x0, k):
-                return 1 / (1 + np.exp(-k * (x-x0)))
+                return 1 / (1 + np.exp(-k * (x - x0)))
             
             @classmethod
             def velocity(cls, x, z):
@@ -320,12 +337,7 @@ class MandelbrotExplorer(Tk):
                 self.canvas2.draw()
 
             def validate_durationSpinbox(self, new_value: str):
-                if new_value.isdigit():
-                    return True
-                elif new_value == "":
-                    return True
-                else:
-                    return False
+                return new_value.isdigit() or new_value == ""
 
             def ask_destionation(self):
                 path = filedialog.asksaveasfilename(parent=self, initialfile=datetime.now().strftime("Mandelbrot Voyage %H:%M:%S %d-%m-%y"), defaultextension='.mp4', filetypes=[('MP4 (*.mp4)', '*.mp4'), ('AVI (*.avi)', '*.avi')], title="Save the video")
