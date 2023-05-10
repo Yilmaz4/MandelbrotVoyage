@@ -11,9 +11,11 @@ from datetime import datetime
 from math import *
 
 import matplotlib.pyplot as plt
-import matplotlib as mpl
 import numpy as np
-import nvidia_smi, cv2, tkinter, tempfile
+import nvidia_smi, tkinter, tempfile
+
+initial_iteration_count = 80
+iteration_coefficient = 1.05
 
 cmaps = ['CMRmap','Greys_r','RdGy_r','afmhot','binary_r','bone','copper','cubehelix','flag_r','gist_earth','gist_gray','gist_heat','gist_stern','gist_yarg_r','gnuplot','gnuplot2','gray','hot','inferno','magma','nipy_spectral']
 
@@ -61,7 +63,7 @@ class MandelbrotExplorer(Tk):
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.size, width=self.size)
         self.offset = np.array([0, 0], dtype=np.float64)
         self.zoom = 4.5
-        self.max_iters = 80
+        self.max_iters = initial_iteration_count
         self.image = np.zeros((self.height, self.width), dtype=np.float64)
         self.image_gpu = cuda.to_device(self.image)
         self.image_lod = np.zeros((int(self.height / 4), int(self.width / 4)), dtype=np.float64)
@@ -359,7 +361,7 @@ class MandelbrotExplorer(Tk):
         self.after(1000, self.update_info)
 
     def load_lod(self):
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters * 0.5, self.image_gpu_lod)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu_lod)
         self.image_gpu_lod.copy_to_host(self.image_lod)
         self.ax.clear()
         self.ax.imshow(self.image_lod, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
@@ -389,7 +391,7 @@ class MandelbrotExplorer(Tk):
     def load_loc(self):
         self.zoom = self.zoom_m1
         self.offset = self.offset_m1.copy()
-        self.max_iters = 150 * 1.1 ** int(np.emath.logn(0.9, self.zoom / 4.5))
+        self.max_iters = initial_iteration_count * iteration_coefficient ** int(np.emath.logn(0.9, self.zoom / 4.5))
         self.update_image()
 
     def center_point(self, event):
@@ -412,10 +414,10 @@ class MandelbrotExplorer(Tk):
             self.after_cancel(self.load_image)
         if delta > 0:
             self.zoom *= 0.9
-            self.max_iters = int(self.max_iters * 1.05)
+            self.max_iters = int(self.max_iters * iteration_coefficient)
         else:
             self.zoom /= 0.9
-            self.max_iters = max(10, int(self.max_iters / 1.05))
+            self.max_iters = max(10, int(self.max_iters / iteration_coefficient))
 
         if self.use_lod.get():
             self.load_lod()
@@ -453,7 +455,7 @@ class MandelbrotExplorer(Tk):
         if self.dragging:
             if self.load_image:
                 self.after_cancel(self.load_image)
-            if self.last_x is not None and self.last_y is not None:
+            if self.last_x and self.last_y:
                 dx = -(event.x - self.last_x)
                 dy = -(self.last_y - event.y)
                 w, h = self.ax.get_xlim()[1] - self.ax.get_xlim()[0], self.ax.get_ylim()[1] - self.ax.get_ylim()[0]
