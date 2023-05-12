@@ -6,41 +6,50 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from numba import cuda
+from numba import cuda, int32
 from datetime import datetime
 from math import *
+from typing import List, Union, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import nvidia_smi, tkinter, tempfile
 
-initial_iteration_count = 80
+initial_iteration_count = 250
 iteration_coefficient = 1.05
 
 cmaps = ['CMRmap','Greys_r','RdGy_r','afmhot','binary_r','bone','copper','cubehelix','flag_r','gist_earth','gist_gray','gist_heat','gist_stern','gist_yarg_r','gnuplot','gnuplot2','gray','hot','inferno','magma','nipy_spectral']
 
 nvidia_smi.nvmlInit()
 
-@cuda.jit(device=True)
-def mandelbrot_pixel(c, max_iters):
-    z = c
-    for i in range(max_iters):
-        if (z.real ** 2 + z.imag ** 2) >= 4:
-            return i
-        z = z * z + c
-    return 0
+pixel = np.dtype([('k', np.complex128), ('v', np.int32)])
 
 @cuda.jit
-def mandelbrot_kernel(zoom, offset, max_iters, output):
+def mandelbrot_kernel(zoom, offset, max_iters, output, cache):
     pixel_size = zoom / min(output.shape[0], output.shape[1])
     start_x, start_y = cuda.grid(2)
     grid_x, grid_y = cuda.gridsize(2)
+
     for i in range(start_x, output.shape[0], grid_x):
         for j in range(start_y, output.shape[1], grid_y):
             imag = (i - output.shape[0] / 2) * pixel_size - offset[0]
             real = (j - output.shape[1] / 2) * pixel_size - offset[1]
             c = complex(real, imag)
-            output[i, j] = mandelbrot_pixel(c, max_iters)
+            
+            pix = 0
+            for i in range(800 * 800):
+                #if cache[i]['k'] == c:
+                    #pix = cache[i]['v']
+                    #break
+                ...
+            else:
+                z = c
+                for k in range(max_iters):
+                    if (z.real ** 2 + z.imag ** 2) >= 4:
+                        pix = k
+                    z = z * z + c
+
+            output[i, j] = pix
 
 class MandelbrotExplorer(Tk):
     def __init__(self):
@@ -54,6 +63,8 @@ class MandelbrotExplorer(Tk):
         # self.wm_resizable(width=False, height=False)
 
         self.width, self.height = self.size, self.size
+
+        self.cache = cuda.device_array(self.height * self.width, dtype=pixel)
 
         self.fig = Figure()
         self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
@@ -197,7 +208,7 @@ class MandelbrotExplorer(Tk):
         self.zoom = 4.5
         self.max_iters = 150
 
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu, self.cache)
         self.image_gpu.copy_to_host(self.image)
         self.ax.clear()
         self.ax.imshow(self.image, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
@@ -225,7 +236,7 @@ class MandelbrotExplorer(Tk):
                 self.wm_geometry(f"532x400")
                 self.wm_resizable(height=False, width=False)
 
-                self.destionationLabel = Label(self, text="Destionation:")
+                self.destionationLabel = Label(self, text="Destination:")
                 self.destionationEntry = Entry(self, width=45)
                 self.destionationBrowseButton = Button(self, text="Browse...", width=18, command=self.ask_destionation)
 
@@ -361,7 +372,7 @@ class MandelbrotExplorer(Tk):
         self.after(1000, self.update_info)
 
     def load_lod(self):
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu_lod)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu_lod, self.cache)
         self.image_gpu_lod.copy_to_host(self.image_lod)
         self.ax.clear()
         self.ax.imshow(self.image_lod, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
@@ -369,7 +380,7 @@ class MandelbrotExplorer(Tk):
         self.canvas.draw()
 
     def update_image(self):
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu, self.cache)
         self.image_gpu.copy_to_host(self.image)
         self.ax.clear()
         self.ax.imshow(self.image, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
