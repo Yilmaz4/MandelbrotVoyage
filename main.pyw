@@ -12,7 +12,7 @@ from math import *
 
 import matplotlib.pyplot as plt
 import numpy as np
-import nvidia_smi, tkinter, tempfile
+import nvidia_smi, tkinter, tempfile, os
 
 initial_iteration_count = 80
 iteration_coefficient = 1.05
@@ -112,7 +112,7 @@ class MandelbrotExplorer(Tk):
                         self.add_separator()
                         self.add_command(label="Create zoom video", command=self.root.make_video)
                         self.add_separator()
-                        self.add_command(label="Exit", accelerator="Alt+F4", command=exit)
+                        self.add_command(label="Exit", accelerator="Alt+F4", command=lambda: os._exit(0))
 
                 class settingsMenu(Menu):
                     def __init__(self, master: menuBar):
@@ -173,7 +173,7 @@ class MandelbrotExplorer(Tk):
     def on_close(self):
         self.destroy()
         self.quit()
-        exit()
+        os._exit(0)
 
     def on_resize(self, event):
         if (event.widget == self and (self.width != event.width or self.height != event.height)):
@@ -187,6 +187,7 @@ class MandelbrotExplorer(Tk):
         self.canvas.get_tk_widget().place_forget()
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
         self.image = np.zeros((self.height, self.width), dtype=np.float64)
+        cuda.to_device(self.image, to=self.image_gpu)
         self.image_gpu = cuda.to_device(self.image)
         self.image_lod = np.zeros((int(self.height / 4), int(self.width / 4)), dtype=np.float64)
         self.image_gpu_lod = cuda.to_device(self.image_lod)
