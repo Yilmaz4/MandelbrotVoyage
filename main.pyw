@@ -417,6 +417,8 @@ class MandelbrotExplorer(Tk):
             self.zoom *= 0.9
             self.max_iters = int(self.max_iters * iteration_coefficient)
         else:
+            if 4.5 / self.zoom < 4e-1:
+                return
             self.zoom /= 0.9
             self.max_iters = max(10, int(self.max_iters / iteration_coefficient))
 
