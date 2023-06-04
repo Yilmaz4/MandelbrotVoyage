@@ -6,16 +6,20 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from numba import cuda
+from numba import cuda, njit, prange
 from datetime import datetime
 from math import *
+from mpmath import mpf, mp
 
 import matplotlib.pyplot as plt
 import numpy as np
-import nvidia_smi, tkinter, tempfile, os
+import nvidia_smi, tkinter, tempfile, os, re
+import moviepy.video.io.ImageSequenceClip
 
 initial_iteration_count = 80
-iteration_coefficient = 1.05
+iteration_coefficient = 0.95
+
+mp.dps = 50
 
 cmaps = ['CMRmap','Greys_r','RdGy_r','afmhot','binary_r','bone','copper','cubehelix','flag_r','gist_earth','gist_gray','gist_heat','gist_stern','gist_yarg_r','gnuplot','gnuplot2','gray','hot','inferno','magma','nipy_spectral']
 
@@ -31,6 +35,15 @@ def mandelbrot_pixel(c, max_iters):
     return 0
 
 @cuda.jit
+def complex_number_search(device_array, search_number, result):
+    thread_id = cuda.grid(1)
+    if thread_id < device_array.shape[0]:
+        real = device_array[thread_id, 0]
+        imag = device_array[thread_id, 1]
+        if real == search_number.real and imag == search_number.imag:
+            result[0] = 1
+
+@cuda.jit()
 def mandelbrot_kernel(zoom, offset, max_iters, output):
     pixel_size = zoom / min(output.shape[0], output.shape[1])
     start_x, start_y = cuda.grid(2)
@@ -40,27 +53,26 @@ def mandelbrot_kernel(zoom, offset, max_iters, output):
             imag = (i - output.shape[0] / 2) * pixel_size - offset[0]
             real = (j - output.shape[1] / 2) * pixel_size - offset[1]
             c = complex(real, imag)
-            output[i, j] = mandelbrot_pixel(c, max_iters)
+
+            p = mandelbrot_pixel(c, max_iters)
+            output[i, j] = p
 
 class MandelbrotExplorer(Tk):
     def __init__(self):
         super().__init__()
 
-        self.size = 800
+        self.width, self.height = 1280, 720
 
         self.wm_title("Mandelbrot Voyage")
-        self.wm_geometry(f"{self.size}x{self.size}")
+        self.wm_geometry(f"{self.width}x{self.height}")
         self.configure(bg="black")
-        # self.wm_resizable(width=False, height=False)
-
-        self.width, self.height = self.size, self.size
 
         self.fig = Figure()
         self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
         self.ax = self.fig.add_subplot(111, aspect=1)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.draw()
-        self.canvas.get_tk_widget().place(x=0, y=0, height=self.size, width=self.size)
+        self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
         self.offset = np.array([0, 0], dtype=np.float64)
         self.zoom = 4.5
         self.max_iters = initial_iteration_count
@@ -129,7 +141,7 @@ class MandelbrotExplorer(Tk):
                         self.add_command(label="Zoom in",  accelerator="E", command=lambda: self.root.zoom_(+1))
                         self.add_command(label="Zoom out", accelerator="Q", command=lambda: self.root.zoom_(-1))
                         self.add_separator()
-                        self.add_command(label="Reset zoom", accelerator="R", command=self.root.reset_zoom)
+                        self.add_command(label="Reset magnification", accelerator="R", command=self.root.reset_zoom)
                 
                 class colorMenu(Menu):
                     def __init__(self, master: menuBar):
@@ -151,7 +163,7 @@ class MandelbrotExplorer(Tk):
 
                 self.add_cascade(label = "File", menu=self.fileMenu)
                 self.add_cascade(label = "Settings", menu=self.settingsMenu)
-                self.add_cascade(label = "Zoom", menu=self.zoomMenu)
+                self.add_cascade(label = "Magnification", menu=self.zoomMenu)
                 self.add_cascade(label = "Color Scheme", menu=self.colorMenu)
                 self.add_command(label = "Help", state="disabled")
 
@@ -187,25 +199,68 @@ class MandelbrotExplorer(Tk):
         self.canvas.get_tk_widget().place_forget()
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
         self.image = np.zeros((self.height, self.width), dtype=np.float64)
-        cuda.to_device(self.image, to=self.image_gpu)
         self.image_gpu = cuda.to_device(self.image)
         self.image_lod = np.zeros((int(self.height / 4), int(self.width / 4)), dtype=np.float64)
         self.image_gpu_lod = cuda.to_device(self.image_lod)
         self.ax.set_aspect(self.height / self.width)
         self.update_image()
 
-    def render_video(self):
-        self.zoom = 4.5
-        self.max_iters = 150
+    def render_video(self, config: Toplevel):
+        final_zoom = self.zoom
+        tempfolder = config.tempFolder.get()
 
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu)
-        self.image_gpu.copy_to_host(self.image)
-        self.ax.clear()
-        self.ax.imshow(self.image, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
-        self.ax.set_aspect(self.height / self.width)
-        self.canvas.draw()
+        self.zoom = 4.5
+        self.max_iters = initial_iteration_count
+
+        fc = mpf(config.duration.get() * config.fps.get())
+        zoom_coefficient = float((final_zoom / mpf(self.zoom)) ** (mpf(1) / fc))
+
+        config.progress.set(0)
+        config.progressBar.configure(maximum = fc + 1)
+
+        def change_state(state):
+            config.renderButton.configure(state=state)
+            config.destinationEntry.configure(state=state)
+            config.destinationBrowseButton.configure(state=state)
+            config.tempFolderEntry.configure(state=state)
+            config.tempFolderBrowseButton.configure(state=state)
+            config.durationSpinbox.configure(state=state)
+            config.fpsSpinbox.configure(state=state)
+            config.resolutionSpinboxW.configure(state=state)
+            config.resolutionSpinboxH.configure(state=state)
+
+        change_state(DISABLED)
+        config.pauseButton.configure(state=NORMAL)
+        config.cancelButton.configure(state=NORMAL)
+
+        if os.path.isdir(tempfolder):
+            for file in os.listdir(tempfolder):
+                path = os.path.join(tempfolder, file)
+                if os.path.isfile(path):
+                    os.remove(path)
+        else:
+            os.mkdir(tempfolder)
+        if config.h.get() != self.height or config.w.get() != self.width:
+            self.image = np.zeros((config.h.get(), config.w.get()), dtype=np.float64)
+            self.image_gpu = cuda.to_device(self.image)
+        for i in range(int(fc)):
+            mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu)
+            self.image_gpu.copy_to_host(self.image)
+            plt.imsave(tempfolder + f'\\{i}.png', self.image, cmap=self.cmap)
+            self.zoom *= zoom_coefficient
+            self.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(0.9)))
+            config.progressBar.step()
+            config.update()
+
+        config.pauseButton.configure(state=DISABLED)
+        config.cancelButton.configure(state=DISABLED)
         
-        self.load_image = None
+        print([os.path.join(tempfolder, img) for img in sorted(os.listdir(tempfolder), key=lambda x: int(os.path.splitext(os.path.basename(x))[0])) if img.endswith(".png")])
+
+        clip = moviepy.video.io.ImageSequenceClip.ImageSequenceClip([os.path.join(tempfolder, img) for img in sorted(os.listdir(tempfolder), key=lambda x: int(os.path.splitext(os.path.basename(x))[0])) if img.endswith(".png")], fps=config.fps.get())
+        clip.write_videofile(config.destinationVar.get())
+
+        change_state(NORMAL)
 
     def make_video(self):
         class Video(Toplevel):
@@ -216,7 +271,11 @@ class MandelbrotExplorer(Tk):
 
                 self.duration = IntVar(value=10)
                 self.fps = IntVar(value=30)
-                self.resolution = IntVar(value=800)
+                self.h = IntVar(value=master.height)
+                self.w = IntVar(value=master.width)
+
+                self.pause = False
+                def pause(): self.pause = True
 
                 self.tempFolder = StringVar(value=tempfile.gettempdir() + "\\Mandelbrot Voyage")
 
@@ -226,13 +285,32 @@ class MandelbrotExplorer(Tk):
                 self.wm_geometry(f"532x400")
                 self.wm_resizable(height=False, width=False)
 
-                self.destionationLabel = Label(self, text="Destionation:")
-                self.destionationEntry = Entry(self, width=45)
-                self.destionationBrowseButton = Button(self, text="Browse...", width=18, command=self.ask_destionation)
+                def required(func):
+                    def wrapper(*args, **kwargs):
+                        result: bool = func(*args, **kwargs)
+                        self.renderButton.configure(state="normal" if result else "disabled")
+                        return result
+                    return wrapper
+
+                @required
+                def check_destination_validity(path) -> bool:
+                    return not os.path.isdir(path) and re.match(r'^[a-zA-Z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]*$', path)
+                @required
+                def check_tempfolder_validity(path)  -> bool:
+                    return os.path.isdir(os.path.dirname(path))
+
+                self.destionationLabel = Label(self, text="Destionation:", foreground="red")
+                self.destinationVar = StringVar()
+                self.destinationVar.trace_add("write", lambda *args, **kwargs: self.destionationLabel.configure(
+                    foreground="black" if check_destination_validity(self.destinationEntry.get()) else "red"))
+                self.destinationEntry = Entry(self, width=45, textvariable=self.destinationVar)
+                self.destinationBrowseButton = Button(self, text="Browse...", width=18, command=self.ask_destionation, takefocus=0)
 
                 self.tempFolderLabel = Label(self, text="Temporary Folder:")
+                self.tempFolder.trace_add("write", lambda *args, **kwargs: self.tempFolderLabel.configure(
+                    foreground="black" if check_tempfolder_validity(self.tempFolderEntry.get()) else "red"))
                 self.tempFolderEntry = Entry(self, width=45, textvariable=self.tempFolder)
-                self.tempFolderBrowseButton = Button(self, text="Browse...", width=18, command=self.ask_tempfolder)
+                self.tempFolderBrowseButton = Button(self, text="Browse...", width=18, command=self.ask_tempfolder, takefocus=0)
 
                 self.durationLabel = Label(self, text="Duration:")
                 self.durationSpinbox = Spinbox(self, width=10, textvariable=self.duration, increment=1, from_=0, to=240, validate="key", validatecommand=(self.register(self.validate_durationSpinbox), "%P"))
@@ -240,23 +318,29 @@ class MandelbrotExplorer(Tk):
                 self.fpsLabel = Label(self, text="FPS:")
                 self.fpsSpinbox = Spinbox(self, width=10, textvariable=self.fps, increment=1, from_=0, to=60, validate="key", validatecommand=(self.register(self.validate_durationSpinbox), "%P"))
                 self.resolutionLabel = Label(self, text="Resolution:")
-                self.resolutionSpinbox = Spinbox(self, width=10, textvariable=self.resolution, increment=1, from_=0, to=8000, validate="key", validatecommand=(self.register(self.validate_durationSpinbox), "%P"), command=lambda: self.resolutionUnitLabel.configure(text=f"x{self.resolutionSpinbox.get()}"))
-                self.resolutionUnitLabel = Label(self, text="x800", foreground="gray")
+                self.resolutionSpinboxW = Spinbox(self, width=6, textvariable=self.w, increment=1, from_=0, to=2160, validate="key", validatecommand=(self.register(self.validate_durationSpinbox), "%P"))
+                self.resolutionSpinboxH = Spinbox(self, width=6, textvariable=self.h, increment=1, from_=0, to=2160, validate="key", validatecommand=(self.register(self.validate_durationSpinbox), "%P"))
+                self.resolutionUnitLabel = Label(self, text="x", foreground="gray")
 
-                self.separator1 = Separator(self, orient="horizontal")
+                self.renderButton = Button(self, text="Render video", width=31, command=lambda: self.root.render_video(self), state="disabled", takefocus=0)
 
-                self.endLocLabel = Label(self, text="Destination:")
-                self.endLocEntry = Entry(self, width=20)
-                self.endLocBrowseButton = Button(self, text="Browse...", width=15)
+                self.progress = IntVar(value=0)
 
-                self.renderButton = Button(self, text="Render video", width=31, command=self.root.render_video)
+                style = Style()
+                style.theme_use("vista")
+                style.configure("CustomProgressbar.Horizontal", troughcolor='#e6e6e6', background="#06b025", thickness=15)
+                style.layout("CustomProgressbar.Horizontal", [('CustomProgressbar.Horizontal.trough', {'children': [('CustomProgressbar.Horizontal.pbar', {'side': 'left', 'sticky': 'ns'})], 'sticky': 'nswe'})])
+                
+                self.progressBar = Progressbar(self, orient="horizontal", length=194, variable=self.progress, style="CustomProgressbar.Horizontal")
+                self.pauseButton = Button(self, text="Pause", width=14, state=DISABLED, command=pause)
+                self.cancelButton = Button(self, text="Cancel", width=14, state=DISABLED)
 
                 z = self.duration.get()
                 x = np.linspace(0, z, 1000)
 
                 self.fig1, self.ax1 = plt.subplots(figsize=(6, 4), facecolor="#f0f0f0")
                 self.ax1.plot(x, self.velocity(x, z))
-                self.ax1.tick_params(labelbottom=True, labelleft=True, labelright=False, labeltop=False)
+                self.ax1.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
                 self.ax1.set_title(f'Zoom Velocity', fontsize=9)
                 self.ax1.grid(True)
 
@@ -275,8 +359,8 @@ class MandelbrotExplorer(Tk):
                 self.canvas2.get_tk_widget().place(x=365, y=70, height=185, width=165)
 
                 self.destionationLabel.place(x=10, y=8)
-                self.destionationEntry.place(x=115, y=7)
-                self.destionationBrowseButton.place(x=400, y=5)
+                self.destinationEntry.place(x=115, y=7)
+                self.destinationBrowseButton.place(x=400, y=5)
 
                 self.tempFolderLabel.place(x=10, y=38)
                 self.tempFolderEntry.place(x=115, y=37)
@@ -288,15 +372,14 @@ class MandelbrotExplorer(Tk):
                 self.fpsLabel.place(x=47, y=98)
                 self.fpsSpinbox.place(x=78, y=97)
                 self.resolutionLabel.place(x=10, y=128)
-                self.resolutionSpinbox.place(x=78, y=127)
-                self.resolutionUnitLabel.place(x=160, y=128)
+                self.resolutionSpinboxW.place(x=78, y=127)
+                self.resolutionUnitLabel.place(x=137, y=128)
+                self.resolutionSpinboxH.place(x=151, y=127)
 
-                self.separator1.place(x=13, y=158, width=192)
-
-                self.endLocLabel.place(x=10, y=162)
-                self.endLocEntry.place(x=80, y=161)
-                
-                self.renderButton.place(x=10, y=188)
+                self.renderButton.place(x=10, y=155)
+                self.progressBar.place(x=11, y=188)
+                self.pauseButton.place(x=10, y=216)
+                self.cancelButton.place(x=112, y=216)
 
                 self.focus_force()
                 self.transient(master)
@@ -343,13 +426,15 @@ class MandelbrotExplorer(Tk):
                 return new_value.isdigit() or new_value == ""
 
             def ask_destionation(self):
-                path = filedialog.asksaveasfilename(parent=self, initialfile=datetime.now().strftime("Mandelbrot Voyage %H:%M:%S %d-%m-%y"), defaultextension='.mp4', filetypes=[('MP4 (*.mp4)', '*.mp4'), ('AVI (*.avi)', '*.avi')], title="Save the video")
+                path = filedialog.asksaveasfilename(parent=self, initialfile=datetime.now().strftime("Mandelbrot Voyage %H.%M.%S %d-%m-%y"), defaultextension='.mp4', filetypes=[('MP4 (*.mp4)', '*.mp4'), ('AVI (*.avi)', '*.avi')], title="Save the video")
                 if path:
-                    self.destionationEntry.insert(0, path)
+                    self.destinationEntry.delete(0, END)
+                    self.destinationEntry.insert(0, path.replace('/', '\\'))
             def ask_tempfolder(self):
                 path = filedialog.askdirectory(parent=self, title="Choose a temporary folder to extract frames")
                 if path:
-                    self.tempFolderEntry.insert(0, path)
+                    self.tempFolderEntry.delete(0, END)
+                    self.tempFolderEntry.insert(0, path.replace('/', '\\'))
             
         video = Video(self)
 
@@ -357,7 +442,7 @@ class MandelbrotExplorer(Tk):
         util = nvidia_smi.nvmlDeviceGetUtilizationRates(self.handle)
         mem = nvidia_smi.nvmlDeviceGetMemoryInfo(self.handle)
 
-        self.display.configure(text="Zoom: " + f"{(4.5 / self.zoom):e}" + "   Iterations: " + f"{self.max_iters:e}" + "   GPU Usage: " + str(util.gpu) + "%   Memory Usage: " + str(int(mem.used / 1048576)) + " MB")
+        self.display.configure(text="Magnification: " + f"{(4.5 / self.zoom):e}" + "   Iterations: " + f"{self.max_iters:e}" + "   GPU Usage: " + str(util.gpu) + "%   Memory Usage: " + str(int(mem.used / 1048576)) + " MB")
     
         self.after(1000, self.update_info)
 
@@ -376,8 +461,10 @@ class MandelbrotExplorer(Tk):
         self.ax.imshow(self.image, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
         self.canvas.draw()
-        
+
         self.load_image = None
+
+        # add to in_set
 
     def save_image(self):
         path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage %H.%M.%S %d-%m-%y"), defaultextension='.png', filetypes=[('PNG (*.png)', '*.png'), ('JPEG (*.jpg)', '*.jpg')], title="Save the screenshot")
@@ -392,7 +479,7 @@ class MandelbrotExplorer(Tk):
     def load_loc(self):
         self.zoom = self.zoom_m1
         self.offset = self.offset_m1.copy()
-        self.max_iters = initial_iteration_count * iteration_coefficient ** int(np.emath.logn(0.9, self.zoom / 4.5))
+        self.max_iters = initial_iteration_count / (0.95 ** (log(self.zoom / 4.5) / log(0.9)))
         self.update_image()
 
     def center_point(self, event):
@@ -415,12 +502,10 @@ class MandelbrotExplorer(Tk):
             self.after_cancel(self.load_image)
         if delta > 0:
             self.zoom *= 0.9
-            self.max_iters = int(self.max_iters * iteration_coefficient)
+            self.max_iters = int(self.max_iters / iteration_coefficient)
         else:
-            if 4.5 / self.zoom < 4e-1:
-                return
             self.zoom /= 0.9
-            self.max_iters = max(10, int(self.max_iters / iteration_coefficient))
+            self.max_iters = max(initial_iteration_count, int(self.max_iters * iteration_coefficient))
 
         if self.use_lod.get():
             self.load_lod()
@@ -430,7 +515,7 @@ class MandelbrotExplorer(Tk):
 
     def reset_zoom(self):
         self.zoom = 4.5
-        self.max_iters = 150
+        self.max_iters = initial_iteration_count
         self.update_image()
 
     def _on_mousewheel(self, event):
