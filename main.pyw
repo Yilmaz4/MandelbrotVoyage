@@ -1,5 +1,6 @@
 from tkinter import *
 from tkinter import filedialog
+TkLabel = Label
 from tkinter.ttk import *
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -14,13 +15,8 @@ from scipy.ndimage import gaussian_filter
 import matplotlib.pyplot as plt
 import numpy as np
 import nvidia_smi, tkinter, tempfile, os
-import pickle, re, threading, time, joblib
+import pickle, re, concurrent.futures
 import moviepy.video.io.ImageSequenceClip
-import multiprocessing as mpr
-import concurrent.futures
-
-
-from mandelbrot import *
 
 initial_iteration_count = 80
 blur_sigma = 0.0
@@ -94,9 +90,7 @@ def mandelbrot_kernel(zoom, offset, max_iters, output, spectrum, initial_spectru
             for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
                 output[i, j, k] = c
 
-#last_computation = np.empty((600, 600), dtype=np.uint32)
-
-"""def mandelbrot_pixel_cpu(c, max_iters):
+def mandelbrot_pixel_cpu(c, max_iters):
     z = c
     for i in range(max_iters):
         if abs(z) >= 2:
@@ -117,12 +111,10 @@ def calculate_mandelbrot_row(args):
         c = mpc(real, imag)
 
         p = mandelbrot_pixel_cpu(c, max_iters)
-
-        s1 = spectrum[(p * 4 - 255) % len(spectrum)]
         for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
             image_row[0, j, k] = c
 
-    return row, image_row"""
+    return row, image_row
 
 class MandelbrotVoyage(Tk):
     def __init__(self):
@@ -170,6 +162,9 @@ class MandelbrotVoyage(Tk):
         self.update_info()
         self.display.place(relx=0.5, rely=1.0, anchor=S, width=self.width)
 
+        self.alertLabel = tkinter.Label(self, bg="black", fg="red",
+            text="Higher Precision Required - Use \"Render with CPU\"")
+
         self.use_lod = BooleanVar(value=False)
 
         self.dragging = False
@@ -180,6 +175,8 @@ class MandelbrotVoyage(Tk):
         class menuBar(Menu):
             def __init__(self, root: MandelbrotVoyage):
                 super().__init__(root, tearoff=0)
+
+                self.root = root
 
                 class fileMenu(Menu):
                     def __init__(self, master: menuBar):
@@ -319,7 +316,31 @@ class MandelbrotVoyage(Tk):
                 self.add_cascade(label = "File", menu=self.fileMenu)
                 self.add_cascade(label = "Edit", menu=self.settingsMenu)
                 self.add_cascade(label = "Magnification", menu=self.zoomMenu)
-                self.add_command(label = "Help", state="disabled")
+                self.add_command(label = "About", command=self.about)
+
+            def about(self):
+                class About(Toplevel):
+                    def __init__(self, master: Tk):
+                        super().__init__(master)
+                        self.root = master
+
+                        self.wm_title("About Mandelbrot Voyage")
+                        self.wm_geometry(f"550x200")
+                        self.wm_resizable(height=False, width=False)
+                        self.grab_set()
+
+                        Label(self, text="""
+Mandelbrot Voyage is a program written in Python, allowing an easy journey into the deeps of
+the Mandelbrot set. Despite Python's infamous slowness factor, a smooth voyage is made possible
+thanks to hardware acceleration, given you have a good enough GPU.
+
+Libraries used are numba for hardware acceleration, tkinter for UI, matplotlib for visualizing
+the set, mpmath for arbitrary precision, and moviepy for creating videos.""").place_configure(x=20, y=0)
+                        self.focus_force()
+                        self.transient(master)
+                        self.mainloop()
+                
+                About(self.root)
 
         self.menuBar = menuBar(self)
         self.config(menu = self.menuBar)
@@ -630,20 +651,9 @@ class MandelbrotVoyage(Tk):
         with concurrent.futures.ProcessPoolExecutor() as executor:
             futures = []
             for row in range(self.rgb_colors.shape[0]):
-                args = [row, self.zoom, self.offset, int(self.max_iters), spectrum, initial_spectrum, self.rgb_colors.shape[0], self.rgb_colors.shape[1], brightness]
+                args = [row, self.zoom, self.offset, int(self.max_iters), spectrum, initial_spectrum, self.rgb_colors.shape[0], self.rgb_colors.shape[1]]
                 future = executor.submit(calculate_mandelbrot_row, args)
                 futures.append(future)
-
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                row = result[0]
-                image_row = result[1]
-                self.rgb_colors[row] = image_row
-
-                self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
-                self.ax.set_aspect(self.height / self.width)
-                self.canvas.draw()
-                self.update()
 
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
         self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
@@ -700,6 +710,11 @@ class MandelbrotVoyage(Tk):
         else:
             self.zoom /= zoom_coefficient
             self.max_iters = max(initial_iteration_count, int(self.max_iters * iteration_coefficient))
+
+        if floor(log10(abs((4.5 / self.zoom)))) >= 14:
+            self.alertLabel.pack_configure(side="top", pady=10)
+        else:
+            self.alertLabel.pack_forget()
 
         if self.use_lod.get():
             self.load_lod()
