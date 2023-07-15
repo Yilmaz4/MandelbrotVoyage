@@ -3,65 +3,132 @@ from tkinter import filedialog
 from tkinter.ttk import *
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from numba import cuda, njit, prange
+from numba import cuda
 from datetime import datetime
 from math import *
-from mpmath import mpf, mp
+from mpmath import mpf, mp, mpc
+from scipy.ndimage import gaussian_filter
 
 import matplotlib.pyplot as plt
 import numpy as np
-import nvidia_smi, tkinter, tempfile, os, re
+import nvidia_smi, tkinter, tempfile, os
+import pickle, re, threading, time, joblib
 import moviepy.video.io.ImageSequenceClip
+import multiprocessing as mpr
+import concurrent.futures
+
+
+from mandelbrot import *
 
 initial_iteration_count = 80
-iteration_coefficient = 0.95
+blur_sigma = 0.0
+brightness = 6
+spectrum_offset = 100
+zoom_coefficient = 0.9
 
-mp.dps = 50
+very_high_iter = 0.935
+high_iter      = 0.95
+med_iter       = 0.96
+low_iter       = 0.97
+very_low_iter  = 0.985
 
-cmaps = ['CMRmap','Greys_r','RdGy_r','afmhot','binary_r','bone','copper','cubehelix','flag_r','gist_earth','gist_gray','gist_heat','gist_stern','gist_yarg_r','gnuplot','gnuplot2','gray','hot','inferno','magma','nipy_spectral']
+iteration_coefficient = med_iter
+
+mp.dps = 20
+
+spectrum = []
+for i in range(6):
+    match i:
+        case 0:
+            for i in range(256):
+                spectrum.append(np.array([255, i, 0]))
+        case 1:
+            for i in range(256):
+                spectrum.append(np.array([255 - i, 255, 0]))
+        case 2:
+            for i in range(256):
+                spectrum.append(np.array([0, 255, i]))
+        case 3:
+            for i in range(256):
+                spectrum.append(np.array([0, 255 - i, 255]))
+        case 4:
+            for i in range(256):
+                spectrum.append(np.array([i, 0, 255]))
+        case 5:
+            for i in range(256):
+                spectrum.append(np.array([255, 0, 255 - i]))
+spectrum = np.array(spectrum)
+spectrum_gpu = cuda.to_device(spectrum)
+
+initial_spectrum = []
+for i in range(256):
+    initial_spectrum.append(np.array([i, 0, 0]))
+initial_spectrum = np.array(initial_spectrum)
+initial_spectrum_gpu = cuda.to_device(initial_spectrum)
 
 nvidia_smi.nvmlInit()
 
 @cuda.jit(device=True)
 def mandelbrot_pixel(c, max_iters):
-    z = c
+    z: complex = c
     for i in range(max_iters):
         if (z.real ** 2 + z.imag ** 2) >= 4:
             return i
         z = z * z + c
     return 0
 
-@cuda.jit
-def complex_number_search(device_array, search_number, result):
-    thread_id = cuda.grid(1)
-    if thread_id < device_array.shape[0]:
-        real = device_array[thread_id, 0]
-        imag = device_array[thread_id, 1]
-        if real == search_number.real and imag == search_number.imag:
-            result[0] = 1
-
 @cuda.jit()
-def mandelbrot_kernel(zoom, offset, max_iters, output):
+def mandelbrot_kernel(zoom, offset, max_iters, output, spectrum, initial_spectrum):
     pixel_size = zoom / min(output.shape[0], output.shape[1])
     start_x, start_y = cuda.grid(2)
     grid_x, grid_y = cuda.gridsize(2)
     for i in range(start_x, output.shape[0], grid_x):
         for j in range(start_y, output.shape[1], grid_y):
-            imag = (i - output.shape[0] / 2) * pixel_size - offset[0]
-            real = (j - output.shape[1] / 2) * pixel_size - offset[1]
+            imag = ((i - output.shape[0] / 2) * pixel_size - offset[0])
+            real = ((j - output.shape[1] / 2) * pixel_size - offset[1])
             c = complex(real, imag)
 
             p = mandelbrot_pixel(c, max_iters)
-            output[i, j] = p
+            for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
+                output[i, j, k] = c
 
-class MandelbrotExplorer(Tk):
+#last_computation = np.empty((600, 600), dtype=np.uint32)
+
+"""def mandelbrot_pixel_cpu(c, max_iters):
+    z = c
+    for i in range(max_iters):
+        if abs(z) >= 2:
+            return i
+        z = z * z + c
+    return 0
+
+def calculate_mandelbrot_row(args):
+    row, zoom, offset, max_iters, spectrum, initial_spectrum, h, w = args
+    image_row = np.empty((1, w, 3), dtype=np.uint8)
+
+    pixel_size = mpf(zoom) / mpf(min(h, w))
+    print(row)
+
+    for j in range(w):
+        imag = mpf((row - h / 2) * pixel_size - offset[0])
+        real = mpf((j - w / 2) * pixel_size - offset[1])
+        c = mpc(real, imag)
+
+        p = mandelbrot_pixel_cpu(c, max_iters)
+
+        s1 = spectrum[(p * 4 - 255) % len(spectrum)]
+        for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
+            image_row[0, j, k] = c
+
+    return row, image_row"""
+
+class MandelbrotVoyage(Tk):
     def __init__(self):
         super().__init__()
 
-        self.width, self.height = 1280, 720
+        self.width, self.height = 600, 600
 
         self.wm_title("Mandelbrot Voyage")
         self.wm_geometry(f"{self.width}x{self.height}")
@@ -76,10 +143,18 @@ class MandelbrotExplorer(Tk):
         self.offset = np.array([0, 0], dtype=np.float64)
         self.zoom = 4.5
         self.max_iters = initial_iteration_count
-        self.image = np.zeros((self.height, self.width), dtype=np.float64)
-        self.image_gpu = cuda.to_device(self.image)
-        self.image_lod = np.zeros((int(self.height / 4), int(self.width / 4)), dtype=np.float64)
-        self.image_gpu_lod = cuda.to_device(self.image_lod)
+        self.custom_coefficient = 0
+
+        self.preview = np.empty((220, 220, 3), dtype=np.uint8)
+        self.preview_gpu = cuda.to_device(self.preview)
+
+        self.rgb_colors = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
+
+        self.rgb_colors_lod = np.empty((int(200 * self.height / self.width), 200, 3), dtype=np.uint8)
+        self.rgb_colors_lod_gpu = cuda.to_device(self.rgb_colors_lod)
+
+        self.update_image()
 
         self.load_image = None
 
@@ -95,27 +170,21 @@ class MandelbrotExplorer(Tk):
         self.update_info()
         self.display.place(relx=0.5, rely=1.0, anchor=S, width=self.width)
 
-        self.cmap = "CMRmap"
         self.use_lod = BooleanVar(value=False)
-
-        self.update_image()
 
         self.dragging = False
         self.double_click = False
         self.resize = None
         self.last_x, self.last_y = None, None
-        self.halt_on_resize = False
-        self.zoom_m1 = None
-        self.offset_m1 = None
 
         class menuBar(Menu):
-            def __init__(self, root):
+            def __init__(self, root: MandelbrotVoyage):
                 super().__init__(root, tearoff=0)
 
                 class fileMenu(Menu):
                     def __init__(self, master: menuBar):
                         super().__init__(master, tearoff=0)
-                        self.root = self.master.master
+                        self.root: MandelbrotVoyage = self.master.master
                         
                         self.add_command(label="Save location", accelerator="Ctrl+C", command=self.root.save_loc)
                         self.add_command(label="Load location", accelerator="Ctrl+L", command=self.root.load_loc)
@@ -124,13 +193,113 @@ class MandelbrotExplorer(Tk):
                         self.add_separator()
                         self.add_command(label="Create zoom video", command=self.root.make_video)
                         self.add_separator()
+                        self.add_command(label="Render with CPU", command=self.root.update_image_cpu)
                         self.add_command(label="Exit", accelerator="Alt+F4", command=lambda: os._exit(0))
 
                 class settingsMenu(Menu):
                     def __init__(self, master: menuBar):
                         super().__init__(master, tearoff=0)
                         self.root = self.master.master
-                        
+
+                        class iterMenu(Menu):
+                            def __init__(self, master: menuBar):
+                                super().__init__(master, tearoff=0)
+                                self.root = self.master.master.master
+                                self.iter = DoubleVar(value=med_iter)
+
+                                self.add_radiobutton(label="Very low", value=very_low_iter, variable=self.iter, command=self.change_iteration_count)
+                                self.add_radiobutton(label="Low", value=low_iter, variable=self.iter, command=self.change_iteration_count)
+                                self.add_radiobutton(label="Medium", value=med_iter, variable=self.iter, command=self.change_iteration_count)
+                                self.add_radiobutton(label="High", value=high_iter, variable=self.iter, command=self.change_iteration_count)
+                                self.add_radiobutton(label="Very High", value=very_high_iter, variable=self.iter, command=self.change_iteration_count)
+                                self.add_separator()
+                                self.add_radiobutton(label="Custom", value=self.root.custom_coefficient, variable=self.iter, command=self.change_iteration_count, state=DISABLED)
+                                self.add_command(label="Fine tune", command=self.fine_tune)
+
+                            def change_iteration_count(self):
+                                global iteration_coefficient
+                                iteration_coefficient = self.iter.get()
+                                self.root.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.root.zoom / 4.5) / log(zoom_coefficient)))
+                                self.root.update_image()
+
+                            def fine_tune(self):
+                                global finetune_ui_up
+                                class Finetune(Toplevel):
+                                    def __init__(self, master: Tk, menu: iterMenu):
+                                        super().__init__(master)
+                                        self.root = master
+                                        self.menu = menu
+
+                                        self.wm_title("Fine tune iteration count increase factor")
+                                        self.wm_geometry(f"352x300")
+                                        self.wm_resizable(height=False, width=False)
+
+                                        self.coefficient = IntVar(value=iteration_coefficient * 10e+4)
+                                        self.scale = Scale(self, variable=self.coefficient, from_=92000, to=99999, orient=VERTICAL)
+                                        self.scale.place(x=10, y=10, height=280)
+                                        self.coefficient.trace_add('write', lambda *args, **kwargs: self.update_preview())
+
+                                        Label(self, text="Very High", foreground="#6d6d6d").place(x=37, y=57)
+                                        Label(self, text="High", foreground="#6d6d6d").place(x=37, y=106)
+                                        Label(self, text="Medium", foreground="#6d6d6d").place(x=37, y=140)
+                                        Label(self, text="Low", foreground="#6d6d6d").place(x=37, y=174)
+                                        Label(self, text="Very Low", foreground="#6d6d6d").place(x=37, y=221)
+
+                                        self.fig = Figure()
+                                        self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+                                        self.ax = self.fig.add_subplot(111, aspect=1)
+                                        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+                                        self.canvas.draw()
+                                        self.canvas.get_tk_widget().place(x=120, y=30, height=220, width=220)
+                                        Label(self, text="Preview:").place(x=118, y=5)
+
+                                        self.applyButton = Button(self, text="Apply", width=16, command=self.apply)
+                                        self.cancelButton = Button(self, text="Cancel", width=16, command=self.destroy)
+                                        self.applyButton.place(x=119, y=260)
+                                        self.cancelButton.place(x=235, y=260)
+
+                                        self.update_preview()
+
+                                        self.protocol("WM_DELETE_WINDOW", self.on_exit)
+
+                                        self.focus_force()
+                                        self.transient(master)
+                                        self.mainloop()
+
+                                    def apply(self):
+                                        global iteration_coefficient
+                                        iteration_coefficient = self.coefficient.get() * 10e-6
+                                        self.root.custom_coefficient = iteration_coefficient
+                                        self.root.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.root.zoom / 4.5) / log(zoom_coefficient)))
+                                        self.root.update_image()
+                                        self.menu.entryconfig(6, state=NORMAL, value=iteration_coefficient)
+                                        self.menu.iter.set(iteration_coefficient)
+                                        self.applyButton.configure(state=DISABLED)
+                                        self.destroy()
+
+                                    def calculate_iter_count(self, zoom, coefficient):
+                                        return initial_iteration_count / (coefficient ** (log(zoom / 4.5) / log(zoom_coefficient)))
+                                    
+                                    def update_preview(self):
+                                        self.applyButton.configure(state=DISABLED if self.coefficient.get() == iteration_coefficient * 10e+4 else NORMAL)
+                                        mandelbrot_kernel[(64, 64), (32, 32)](self.root.zoom, self.root.offset, self.calculate_iter_count(self.root.zoom, self.coefficient.get() * 10e-6), self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu)
+                                        self.root.preview_gpu.copy_to_host(self.root.preview)
+                                        self.ax.clear()
+                                        self.ax.imshow(gaussian_filter(self.root.preview, sigma=0.6), extent=[-2.5, 1.5, -2, 2])
+                                        self.canvas.draw()
+                                    
+                                    def on_exit(self):
+                                        global finetune_ui_up
+                                        finetune_ui_up = True
+                                        self.destroy()
+                                
+                                Finetune(self.root, self)
+                                finetune_ui_up = True
+
+                        self.iterMenu = iterMenu(self)
+
+                        self.add_cascade(label="Iteration", menu=self.iterMenu)
+                        self.add_separator()
                         self.add_checkbutton(label="Load low resolution first", variable=self.root.use_lod)
 
                 class zoomMenu(Menu):
@@ -143,28 +312,13 @@ class MandelbrotExplorer(Tk):
                         self.add_separator()
                         self.add_command(label="Reset magnification", accelerator="R", command=self.root.reset_zoom)
                 
-                class colorMenu(Menu):
-                    def __init__(self, master: menuBar):
-                        super().__init__(master, tearoff=0)
-                        self.root = self.master.master
-                        self.cmap = StringVar(value="hot")
-                        for cmap in cmaps:
-                            self.add_radiobutton(label=cmap, value=cmap, variable=self.cmap, command=self.change_cmap)
-
-                    def change_cmap(self):
-                        root.cmap = self.cmap.get()
-                        root.update_image()
-
-                
                 self.fileMenu = fileMenu(self)
                 self.settingsMenu = settingsMenu(self)
                 self.zoomMenu = zoomMenu(self)
-                self.colorMenu = colorMenu(self)
 
                 self.add_cascade(label = "File", menu=self.fileMenu)
-                self.add_cascade(label = "Settings", menu=self.settingsMenu)
+                self.add_cascade(label = "Edit", menu=self.settingsMenu)
                 self.add_cascade(label = "Magnification", menu=self.zoomMenu)
-                self.add_cascade(label = "Color Scheme", menu=self.colorMenu)
                 self.add_command(label = "Help", state="disabled")
 
         self.menuBar = menuBar(self)
@@ -198,10 +352,13 @@ class MandelbrotExplorer(Tk):
         self.resize = None
         self.canvas.get_tk_widget().place_forget()
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
-        self.image = np.zeros((self.height, self.width), dtype=np.float64)
-        self.image_gpu = cuda.to_device(self.image)
-        self.image_lod = np.zeros((int(self.height / 4), int(self.width / 4)), dtype=np.float64)
-        self.image_gpu_lod = cuda.to_device(self.image_lod)
+
+        self.rgb_colors = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
+
+        self.rgb_colors_lod = np.empty((int(200 * self.height / self.width), 200, 3), dtype=np.uint8)
+        self.rgb_colors_lod_gpu = cuda.to_device(self.rgb_colors_lod)
+
         self.ax.set_aspect(self.height / self.width)
         self.update_image()
 
@@ -241,21 +398,20 @@ class MandelbrotExplorer(Tk):
         else:
             os.mkdir(tempfolder)
         if config.h.get() != self.height or config.w.get() != self.width:
-            self.image = np.zeros((config.h.get(), config.w.get()), dtype=np.float64)
-            self.image_gpu = cuda.to_device(self.image)
+            self.rgb_colors = np.empty((config.h.get(), config.w.get(), 3), dtype=np.uint8)
+            self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
+
         for i in range(int(fc)):
-            mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu)
-            self.image_gpu.copy_to_host(self.image)
-            plt.imsave(tempfolder + f'\\{i}.png', self.image, cmap=self.cmap)
+            mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu)
+            self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
+            plt.imsave(tempfolder + f'\\{i}.png', gaussian_filter(self.rgb_colors, sigma=blur_sigma))
             self.zoom *= zoom_coefficient
-            self.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(0.9)))
+            self.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))
             config.progressBar.step()
             config.update()
 
         config.pauseButton.configure(state=DISABLED)
         config.cancelButton.configure(state=DISABLED)
-        
-        print([os.path.join(tempfolder, img) for img in sorted(os.listdir(tempfolder), key=lambda x: int(os.path.splitext(os.path.basename(x))[0])) if img.endswith(".png")])
 
         clip = moviepy.video.io.ImageSequenceClip.ImageSequenceClip([os.path.join(tempfolder, img) for img in sorted(os.listdir(tempfolder), key=lambda x: int(os.path.splitext(os.path.basename(x))[0])) if img.endswith(".png")], fps=config.fps.get())
         clip.write_videofile(config.destinationVar.get())
@@ -282,7 +438,7 @@ class MandelbrotExplorer(Tk):
                 self.duration.trace("w", lambda *args: self.on_durationSpinbox_change())
 
                 self.wm_title("Make zoom video")
-                self.wm_geometry(f"532x400")
+                self.wm_geometry(f"532x270")
                 self.wm_resizable(height=False, width=False)
 
                 def required(func):
@@ -447,40 +603,78 @@ class MandelbrotExplorer(Tk):
         self.after(1000, self.update_info)
 
     def load_lod(self):
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu_lod)
-        self.image_gpu_lod.copy_to_host(self.image_lod)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu)
+        self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.ax.clear()
-        self.ax.imshow(self.image_lod, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
+        self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
+        self.ax.imshow(self.rgb_colors_lod, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
         self.canvas.draw()
 
     def update_image(self):
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.image_gpu)
-        self.image_gpu.copy_to_host(self.image)
+        if 0:
+            self.update_image_cpu()
+            return
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu)
+        self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
         self.ax.clear()
-        self.ax.imshow(self.image, cmap=self.cmap, extent=[-2.5, 1.5, -2, 2])
+        self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
+        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
         self.canvas.draw()
 
         self.load_image = None
+    
+    def update_image_cpu(self):
+        print(self.rgb_colors.shape[0], self.rgb_colors.shape[1])
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            futures = []
+            for row in range(self.rgb_colors.shape[0]):
+                args = [row, self.zoom, self.offset, int(self.max_iters), spectrum, initial_spectrum, self.rgb_colors.shape[0], self.rgb_colors.shape[1], brightness]
+                future = executor.submit(calculate_mandelbrot_row, args)
+                futures.append(future)
 
-        # add to in_set
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                row = result[0]
+                image_row = result[1]
+                self.rgb_colors[row] = image_row
+
+                self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
+                self.ax.set_aspect(self.height / self.width)
+                self.canvas.draw()
+                self.update()
+
+        self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
+        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
+        self.ax.set_aspect(self.height / self.width)
+        self.canvas.draw()
+        self.update_idletasks()  # Refresh the Tkinter window
 
     def save_image(self):
         path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage %H.%M.%S %d-%m-%y"), defaultextension='.png', filetypes=[('PNG (*.png)', '*.png'), ('JPEG (*.jpg)', '*.jpg')], title="Save the screenshot")
         if not path:
             return
-        plt.imsave(path, self.image, cmap=self.cmap)
+        plt.imsave(path, self.rgb_colors)
 
     def save_loc(self):
-        self.zoom_m1 = self.zoom
-        self.offset_m1 = self.offset.copy()
+        path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage Location %H.%M.%S %d-%m-%y"), defaultextension='.loc', filetypes=[('MV Location File (*.loc)', '*.loc')], title="Save the current location")
+        if not path:
+            return
+        with open(path, 'wb') as file:
+            pickle.dump(self.offset, file, pickle.HIGHEST_PROTOCOL)
+            pickle.dump(self.zoom,   file, pickle.HIGHEST_PROTOCOL)
 
     def load_loc(self):
-        self.zoom = self.zoom_m1
-        self.offset = self.offset_m1.copy()
-        self.max_iters = initial_iteration_count / (0.95 ** (log(self.zoom / 4.5) / log(0.9)))
-        self.update_image()
+        path = filedialog.askopenfilename(filetypes=[('MV Location File (*.loc)', '*.loc'), ('All types (*.*)', '*.*')], title="Load saved location")
+        if not path:
+            return
+        with open(path, 'rb') as file:
+            self.offset = pickle.load(file).copy()
+            self.zoom = pickle.load(file)
+
+        self.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))
+        self.update_image_cpu()
 
     def center_point(self, event):
         dx = (event.x - self.width / 2) / self.width
@@ -501,10 +695,10 @@ class MandelbrotExplorer(Tk):
         if self.load_image:
             self.after_cancel(self.load_image)
         if delta > 0:
-            self.zoom *= 0.9
+            self.zoom *= zoom_coefficient
             self.max_iters = int(self.max_iters / iteration_coefficient)
         else:
-            self.zoom /= 0.9
+            self.zoom /= zoom_coefficient
             self.max_iters = max(initial_iteration_count, int(self.max_iters * iteration_coefficient))
 
         if self.use_lod.get():
@@ -556,5 +750,6 @@ class MandelbrotExplorer(Tk):
                 else:
                     self.update_image()
 
-app = MandelbrotExplorer()
-app.mainloop()
+if __name__ == "__main__":
+    app = MandelbrotVoyage()
+    app.mainloop()
