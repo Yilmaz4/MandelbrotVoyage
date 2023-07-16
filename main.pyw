@@ -1,5 +1,5 @@
 from tkinter import *
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 TkLabel = Label
 from tkinter.ttk import *
 
@@ -11,6 +11,7 @@ from datetime import datetime
 from math import *
 from mpmath import mpf, mp, mpc
 from scipy.ndimage import gaussian_filter
+from PIL import Image, ImageTk
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -282,7 +283,7 @@ class MandelbrotVoyage(Tk):
                                         mandelbrot_kernel[(64, 64), (32, 32)](self.root.zoom, self.root.offset, self.calculate_iter_count(self.root.zoom, self.coefficient.get() * 10e-6), self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu)
                                         self.root.preview_gpu.copy_to_host(self.root.preview)
                                         self.ax.clear()
-                                        self.ax.imshow(gaussian_filter(self.root.preview, sigma=0.6), extent=[-2.5, 1.5, -2, 2])
+                                        self.ax.imshow(gaussian_filter(self.root.preview, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2])
                                         self.canvas.draw()
                                     
                                     def on_exit(self):
@@ -357,6 +358,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
 
         self.after(1000, self.update_info)
 
+        self.make_video()
+
     def on_close(self):
         self.destroy()
         self.quit()
@@ -384,6 +387,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.update_image()
 
     def render_video(self, config: Toplevel):
+        config.rendering = True
         final_zoom = self.zoom
         tempfolder = config.tempFolder.get()
 
@@ -425,19 +429,32 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         for i in range(int(fc)):
             mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu)
             self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
+
+            self.ax.clear()
+            self.ax.imshow(gaussian_filter(self.rgb_colors, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2])
+            self.canvas.draw()
+
             plt.imsave(tempfolder + f'\\{i}.png', gaussian_filter(self.rgb_colors, sigma=blur_sigma))
             self.zoom *= zoom_coefficient
             self.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))
             config.progressBar.step()
             config.update()
 
-        config.pauseButton.configure(state=DISABLED)
-        config.cancelButton.configure(state=DISABLED)
+            while config.pause:
+                config.update() # run manual mainloop
 
-        clip = moviepy.video.io.ImageSequenceClip.ImageSequenceClip([os.path.join(tempfolder, img) for img in sorted(os.listdir(tempfolder), key=lambda x: int(os.path.splitext(os.path.basename(x))[0])) if img.endswith(".png")], fps=config.fps.get())
-        clip.write_videofile(config.destinationVar.get())
+            if config.halt:
+                break
+        else:
+            config.pauseButton.configure(state=DISABLED)
+            config.cancelButton.configure(state=DISABLED)
 
-        change_state(NORMAL)
+            clip = moviepy.video.io.ImageSequenceClip.ImageSequenceClip([os.path.join(tempfolder, img) for img in sorted(os.listdir(tempfolder), key=lambda x: int(os.path.splitext(os.path.basename(x))[0])) if img.endswith(".png")], fps=config.fps.get())
+            clip.write_videofile(config.destinationVar.get())
+
+            change_state(NORMAL)
+            return
+        
 
     def make_video(self):
         class Video(Toplevel):
@@ -451,8 +468,13 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.h = IntVar(value=master.height)
                 self.w = IntVar(value=master.width)
 
+                self.rendering = False
+                self.halt = False
+                def halt():
+                    self.halt = True
                 self.pause = False
-                def pause(): self.pause = True
+                def pause():
+                    self.pause = True
 
                 self.tempFolder = StringVar(value=tempfile.gettempdir() + "\\Mandelbrot Voyage")
 
@@ -461,6 +483,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.wm_title("Make zoom video")
                 self.wm_geometry(f"532x270")
                 self.wm_resizable(height=False, width=False)
+                self.grab_set()
 
                 def required(func):
                     def wrapper(*args, **kwargs):
@@ -510,30 +533,27 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 
                 self.progressBar = Progressbar(self, orient="horizontal", length=194, variable=self.progress, style="CustomProgressbar.Horizontal")
                 self.pauseButton = Button(self, text="Pause", width=14, state=DISABLED, command=pause)
-                self.cancelButton = Button(self, text="Cancel", width=14, state=DISABLED)
+                self.cancelButton = Button(self, text="Cancel", width=14, state=DISABLED, command=halt)
 
                 z = self.duration.get()
                 x = np.linspace(0, z, 1000)
 
+                self.fig = Figure()
+                self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+                self.ax = self.fig.add_subplot(111, aspect=1)
+                self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+                self.canvas.draw()
+                self.canvas.get_tk_widget().place(x=220, y=70, height=165, width=165)
+
                 self.fig1, self.ax1 = plt.subplots(figsize=(6, 4), facecolor="#f0f0f0")
                 self.ax1.plot(x, self.velocity(x, z))
                 self.ax1.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
-                self.ax1.set_title(f'Zoom Velocity', fontsize=9)
+                self.ax1.set_title(f'Zoom Velocity', fontdict={'fontfamily':'Segoe UI', 'fontsize':9})
                 self.ax1.grid(True)
 
                 self.canvas1 = FigureCanvasTkAgg(self.fig1, master=self)
                 self.canvas1.draw()
-                self.canvas1.get_tk_widget().place(x=210, y=70, height=185, width=165)
-
-                self.fig2, self.ax2 = plt.subplots(figsize=(6, 4), facecolor="#f0f0f0")
-                self.ax2.plot(x, self.derivative(x, z))
-                self.ax2.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
-                self.ax2.set_title(f'Zoom Acceleration', fontsize=9)
-                self.ax2.grid(True)
-
-                self.canvas2 = FigureCanvasTkAgg(self.fig2, master=self)
-                self.canvas2.draw()
-                self.canvas2.get_tk_widget().place(x=365, y=70, height=185, width=165)
+                self.canvas1.get_tk_widget().place(x=365, y=70, height=185, width=165)
 
                 self.destionationLabel.place(x=10, y=8)
                 self.destinationEntry.place(x=115, y=7)
@@ -558,9 +578,17 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.pauseButton.place(x=10, y=216)
                 self.cancelButton.place(x=112, y=216)
 
+                self.wm_protocol("WM_DELETE_WINDOW", self.on_close)
+
                 self.focus_force()
                 self.transient(master)
                 self.mainloop()
+
+            def on_close(self):
+                if self.rendering and not messagebox.askokcancel("On-going render", "If you exit now, all progress will be lost! Click OK to exit.", icon="warning"):
+                    return
+                self.halt = True
+                self.destroy()
 
             @staticmethod
             def sigmoid_derivative(x, x0, k):
@@ -584,20 +612,13 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 z = self.duration.get()
                 x = np.linspace(0, z, 1000)
                 self.ax1.clear()
-                self.ax2.clear()
 
                 self.ax1.plot(x, self.velocity(x, z))
                 self.ax1.tick_params(labelbottom=True, labelleft=True, labelright=False, labeltop=False)
                 self.ax1.set_title(f'Zoom Velocity', fontsize=9)
                 self.ax1.grid(True)
 
-                self.ax2.plot(x, self.derivative(x, z))
-                self.ax2.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
-                self.ax2.set_title(f'Zoom Acceleration', fontsize=9)
-                self.ax2.grid(True)
-
                 self.canvas1.draw()
-                self.canvas2.draw()
 
             def validate_durationSpinbox(self, new_value: str):
                 return new_value.isdigit() or new_value == ""
