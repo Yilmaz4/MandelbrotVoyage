@@ -11,7 +11,7 @@ from datetime import datetime
 from math import *
 from mpmath import mpf, mp, mpc
 from scipy.ndimage import gaussian_filter
-from PIL import Image, ImageTk
+from typing import *
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,19 +19,19 @@ import nvidia_smi, tkinter, tempfile, os
 import pickle, re, concurrent.futures
 import moviepy.video.io.ImageSequenceClip
 
-initial_iteration_count = 80
-blur_sigma = 0.0
-brightness = 6
-spectrum_offset = 100
-zoom_coefficient = 0.9
-
 very_high_iter = 0.935
 high_iter      = 0.95
 med_iter       = 0.96
 low_iter       = 0.97
 very_low_iter  = 0.985
 
+initial_iteration_count = 80
+
 iteration_coefficient = med_iter
+blur_sigma = 0.0
+brightness = 6
+spectrum_offset = 0
+zoom_coefficient = 0.9
 
 mp.dps = 20
 
@@ -67,6 +67,83 @@ initial_spectrum_gpu = cuda.to_device(initial_spectrum)
 
 nvidia_smi.nvmlInit()
 
+class Config(Toplevel):
+    def __init__(self, master: Tk, menu: Menu, name: str, variable: Union[IntVar, DoubleVar], def_value: Union[int, float],
+                 min: Union[int, float], max: Union[int, float], preset_labels: bool, default: Tuple[Union[float, int]], apply_func: Callable):
+        super().__init__(master)
+        self.root = master
+        self.menu = menu
+        self.variable, self.apply_func = variable, apply_func
+
+        self._coefficient, self._blur_sigma, self._brightness, self._spectrum_offset = default
+
+        self.wm_title("Fine tune " + name)
+        self.wm_geometry("352x300" if preset_labels else "310x300")
+        self.wm_resizable(height=False, width=False)
+
+        self.var = IntVar(value=def_value)
+        self.scale = Scale(self, variable=self.var, from_=min, to=max, orient=VERTICAL)
+        self.scale.place(x=10, y=10, height=280)
+        self.var.trace_add('write', lambda *args, **kwargs: self.update_preview())
+
+        if preset_labels:
+            Label(self, text="Very High", foreground="#6d6d6d").place(x=37, y=57)
+            Label(self, text="High", foreground="#6d6d6d").place(x=37, y=106)
+            Label(self, text="Medium", foreground="#6d6d6d").place(x=37, y=140)
+            Label(self, text="Low", foreground="#6d6d6d").place(x=37, y=174)
+            Label(self, text="Very Low", foreground="#6d6d6d").place(x=37, y=221)
+
+        self.fig = Figure()
+        self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        self.ax = self.fig.add_subplot(111, aspect=1)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().place(x=120 - (42 if preset_labels else 0), y=30, height=220, width=220)
+        Label(self, text="Preview:").place(x=118 - (42 if preset_labels else 0), y=5)
+
+        self.applyButton = Button(self, text="Apply", width=16, command=self.apply)
+        self.cancelButton = Button(self, text="Cancel", width=16, command=self.destroy)
+        self.applyButton.place(x=119, y=260)
+        self.cancelButton.place(x=235, y=260)
+
+        self.update_preview()
+
+        self.protocol("WM_DELETE_WINDOW", self.on_exit)
+
+        self.focus_force()
+        self.transient(master)
+        self.mainloop()
+
+    @property
+    def coefficient(self) -> Optional[int]:
+        return self._coefficient or self.var
+    @property
+    def blur_sigma(self) -> Optional[float]:
+        return self._blur_sigma or self.var
+    @property
+    def brightness(self) -> Optional[float]:
+        return self._brightness or self.var
+    @property
+    def spectrum_offset(self) -> Optional[int]:
+        return self._spectrum_offset or self.var
+
+    def apply(self):
+        self.variable.set(self.var.get())
+        self.applyButton.configure(state=DISABLED)
+
+        self.destroy()
+    
+    def update_preview(self):
+        self.applyButton.configure(state=DISABLED if self.coefficient.get() == iteration_coefficient * 10e+4 else NORMAL)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.root.zoom, self.root.offset, self.coefficient, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, self.brightness, self.spectrum_offset)
+        self.root.preview_gpu.copy_to_host(self.root.preview)
+        self.ax.clear()
+        self.ax.imshow(gaussian_filter(self.root.preview, sigma=self.blur_sigma), extent=[-2.5, 1.5, -2, 2])
+        self.canvas.draw()
+    
+    def on_exit(self):
+        self.destroy()
+
 @cuda.jit(device=True)
 def mandelbrot_pixel(c, max_iters):
     z: complex = c
@@ -77,7 +154,8 @@ def mandelbrot_pixel(c, max_iters):
     return 0
 
 @cuda.jit()
-def mandelbrot_kernel(zoom, offset, max_iters, output, spectrum, initial_spectrum):
+def mandelbrot_kernel(zoom, offset, coefficient, output, spectrum, initial_spectrum, brightness, spectrum_offset):
+    max_iters = initial_iteration_count / (coefficient ** (log(zoom / 4.5) / log(zoom_coefficient)))
     pixel_size = zoom / min(output.shape[0], output.shape[1])
     start_x, start_y = cuda.grid(2)
     grid_x, grid_y = cuda.gridsize(2)
@@ -221,78 +299,11 @@ class MandelbrotVoyage(Tk):
                                 self.root.update_image()
 
                             def fine_tune(self):
-                                global finetune_ui_up
-                                class Finetune(Toplevel):
-                                    def __init__(self, master: Tk, menu: iterMenu):
-                                        super().__init__(master)
-                                        self.root = master
-                                        self.menu = menu
-
-                                        self.wm_title("Fine tune iteration count increase factor")
-                                        self.wm_geometry(f"352x300")
-                                        self.wm_resizable(height=False, width=False)
-
-                                        self.coefficient = IntVar(value=iteration_coefficient * 10e+4)
-                                        self.scale = Scale(self, variable=self.coefficient, from_=92000, to=99999, orient=VERTICAL)
-                                        self.scale.place(x=10, y=10, height=280)
-                                        self.coefficient.trace_add('write', lambda *args, **kwargs: self.update_preview())
-
-                                        Label(self, text="Very High", foreground="#6d6d6d").place(x=37, y=57)
-                                        Label(self, text="High", foreground="#6d6d6d").place(x=37, y=106)
-                                        Label(self, text="Medium", foreground="#6d6d6d").place(x=37, y=140)
-                                        Label(self, text="Low", foreground="#6d6d6d").place(x=37, y=174)
-                                        Label(self, text="Very Low", foreground="#6d6d6d").place(x=37, y=221)
-
-                                        self.fig = Figure()
-                                        self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-                                        self.ax = self.fig.add_subplot(111, aspect=1)
-                                        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
-                                        self.canvas.draw()
-                                        self.canvas.get_tk_widget().place(x=120, y=30, height=220, width=220)
-                                        Label(self, text="Preview:").place(x=118, y=5)
-
-                                        self.applyButton = Button(self, text="Apply", width=16, command=self.apply)
-                                        self.cancelButton = Button(self, text="Cancel", width=16, command=self.destroy)
-                                        self.applyButton.place(x=119, y=260)
-                                        self.cancelButton.place(x=235, y=260)
-
-                                        self.update_preview()
-
-                                        self.protocol("WM_DELETE_WINDOW", self.on_exit)
-
-                                        self.focus_force()
-                                        self.transient(master)
-                                        self.mainloop()
-
-                                    def apply(self):
-                                        global iteration_coefficient
-                                        iteration_coefficient = self.coefficient.get() * 10e-6
-                                        self.root.custom_coefficient = iteration_coefficient
-                                        self.root.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.root.zoom / 4.5) / log(zoom_coefficient)))
-                                        self.root.update_image()
-                                        self.menu.entryconfig(6, state=NORMAL, value=iteration_coefficient)
-                                        self.menu.iter.set(iteration_coefficient)
-                                        self.applyButton.configure(state=DISABLED)
-                                        self.destroy()
-
-                                    def calculate_iter_count(self, zoom, coefficient):
-                                        return initial_iteration_count / (coefficient ** (log(zoom / 4.5) / log(zoom_coefficient)))
-                                    
-                                    def update_preview(self):
-                                        self.applyButton.configure(state=DISABLED if self.coefficient.get() == iteration_coefficient * 10e+4 else NORMAL)
-                                        mandelbrot_kernel[(64, 64), (32, 32)](self.root.zoom, self.root.offset, self.calculate_iter_count(self.root.zoom, self.coefficient.get() * 10e-6), self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu)
-                                        self.root.preview_gpu.copy_to_host(self.root.preview)
-                                        self.ax.clear()
-                                        self.ax.imshow(gaussian_filter(self.root.preview, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2])
-                                        self.canvas.draw()
-                                    
-                                    def on_exit(self):
-                                        global finetune_ui_up
-                                        finetune_ui_up = True
-                                        self.destroy()
-                                
-                                Finetune(self.root, self)
-                                finetune_ui_up = True
+                                def apply():
+                                    custom_coefficient = iteration_coefficient = self.iter.get()
+                                    self.entryconfig(6, state=NORMAL, value=iteration_coefficient)
+                                    self.change_iteration_count()
+                                Config(self.root, self, "iteration increase factor", self.iter, iteration_coefficient * 10e+4, 92000, 99999, True, (None, blur_sigma, brightness, spectrum_offset), apply)
 
                         self.iterMenu = iterMenu(self)
 
@@ -427,7 +438,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
         for i in range(int(fc)):
-            mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu)
+            mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
             self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
 
             self.ax.clear()
@@ -645,7 +656,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.after(1000, self.update_info)
 
     def load_lod(self):
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
@@ -657,7 +668,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         if 0:
             self.update_image_cpu()
             return
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
         self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
