@@ -19,15 +19,9 @@ import nvidia_smi, tkinter, tempfile, os
 import pickle, re, concurrent.futures
 import moviepy.video.io.ImageSequenceClip
 
-very_high_iter = 0.935
-high_iter      = 0.95
-med_iter       = 0.96
-low_iter       = 0.97
-very_low_iter  = 0.985
-
 initial_iteration_count = 80
 
-iteration_coefficient = med_iter
+iteration_coefficient = 0.96
 blur_sigma = 0.0
 brightness = 6
 spectrum_offset = 0
@@ -73,9 +67,10 @@ class Config(Toplevel):
         super().__init__(master)
         self.root = master
         self.menu = menu
-        self.variable, self.apply_func = variable, apply_func
+        self.variable, self.apply_func, self.def_value = variable, apply_func, def_value
 
         self._coefficient, self._blur_sigma, self._brightness, self._spectrum_offset = default
+        if default[0] is not None: self._coefficient *= 10e+6
 
         self.wm_title("Fine tune " + name)
         self.wm_geometry("352x300" if preset_labels else "310x300")
@@ -98,13 +93,15 @@ class Config(Toplevel):
         self.ax = self.fig.add_subplot(111, aspect=1)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.draw()
-        self.canvas.get_tk_widget().place(x=120 - (42 if preset_labels else 0), y=30, height=220, width=220)
-        Label(self, text="Preview:").place(x=118 - (42 if preset_labels else 0), y=5)
+        self.canvas.get_tk_widget().place(x=120 - (42 if not preset_labels else 0), y=30, height=220, width=220)
+        Label(self, text="Preview:").place(x=118 - (42 if not preset_labels else 0), y=5)
 
         self.applyButton = Button(self, text="Apply", width=16, command=self.apply)
         self.cancelButton = Button(self, text="Cancel", width=16, command=self.destroy)
         self.applyButton.place(x=119, y=260)
         self.cancelButton.place(x=235, y=260)
+
+        print("update preview")
 
         self.update_preview()
 
@@ -116,16 +113,16 @@ class Config(Toplevel):
 
     @property
     def coefficient(self) -> Optional[int]:
-        return self._coefficient or self.var
+        return self._coefficient if self._coefficient is not None else self.var.get()
     @property
     def blur_sigma(self) -> Optional[float]:
-        return self._blur_sigma or self.var
+        return self._blur_sigma if self._blur_sigma is not None else self.var.get()
     @property
     def brightness(self) -> Optional[float]:
-        return self._brightness or self.var
+        return self._brightness if self._brightness is not None else self.var.get()
     @property
     def spectrum_offset(self) -> Optional[int]:
-        return self._spectrum_offset or self.var
+        return self._spectrum_offset if self._spectrum_offset is not None else self.var.get()
 
     def apply(self):
         self.variable.set(self.var.get())
@@ -134,8 +131,9 @@ class Config(Toplevel):
         self.destroy()
     
     def update_preview(self):
-        self.applyButton.configure(state=DISABLED if self.coefficient.get() == iteration_coefficient * 10e+4 else NORMAL)
-        mandelbrot_kernel[(64, 64), (32, 32)](self.root.zoom, self.root.offset, self.coefficient, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, self.brightness, self.spectrum_offset)
+        print(self.blur_sigma)          
+        self.applyButton.configure(state=DISABLED if self.var.get() == self.def_value else NORMAL)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.root.zoom, self.root.offset, self.coefficient * 10e-6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, self.brightness, self.spectrum_offset)
         self.root.preview_gpu.copy_to_host(self.root.preview)
         self.ax.clear()
         self.ax.imshow(gaussian_filter(self.root.preview, sigma=self.blur_sigma), extent=[-2.5, 1.5, -2, 2])
@@ -213,8 +211,8 @@ class MandelbrotVoyage(Tk):
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
         self.offset = np.array([0, 0], dtype=np.float64)
         self.zoom = 4.5
-        self.max_iters = initial_iteration_count
         self.custom_coefficient = 0
+        self.custom_blur_sigma = 0
 
         self.preview = np.empty((220, 220, 3), dtype=np.uint8)
         self.preview_gpu = cuda.to_device(self.preview)
@@ -281,13 +279,13 @@ class MandelbrotVoyage(Tk):
                             def __init__(self, master: menuBar):
                                 super().__init__(master, tearoff=0)
                                 self.root = self.master.master.master
-                                self.iter = DoubleVar(value=med_iter)
+                                self.iter = DoubleVar(value=0.96)
 
-                                self.add_radiobutton(label="Very low", value=very_low_iter, variable=self.iter, command=self.change_iteration_count)
-                                self.add_radiobutton(label="Low", value=low_iter, variable=self.iter, command=self.change_iteration_count)
-                                self.add_radiobutton(label="Medium", value=med_iter, variable=self.iter, command=self.change_iteration_count)
-                                self.add_radiobutton(label="High", value=high_iter, variable=self.iter, command=self.change_iteration_count)
-                                self.add_radiobutton(label="Very High", value=very_high_iter, variable=self.iter, command=self.change_iteration_count)
+                                self.add_radiobutton(label="Very low", value=0.985, variable=self.iter, command=self.change_iteration_count)
+                                self.add_radiobutton(label="Low", value=0.97, variable=self.iter, command=self.change_iteration_count)
+                                self.add_radiobutton(label="Medium (default)", value=0.96, variable=self.iter, command=self.change_iteration_count)
+                                self.add_radiobutton(label="High", value=0.95, variable=self.iter, command=self.change_iteration_count)
+                                self.add_radiobutton(label="Very High", value=0.935, variable=self.iter, command=self.change_iteration_count)
                                 self.add_separator()
                                 self.add_radiobutton(label="Custom", value=self.root.custom_coefficient, variable=self.iter, command=self.change_iteration_count, state=DISABLED)
                                 self.add_command(label="Fine tune", command=self.fine_tune)
@@ -295,19 +293,51 @@ class MandelbrotVoyage(Tk):
                             def change_iteration_count(self):
                                 global iteration_coefficient
                                 iteration_coefficient = self.iter.get()
-                                self.root.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.root.zoom / 4.5) / log(zoom_coefficient)))
                                 self.root.update_image()
 
                             def fine_tune(self):
                                 def apply():
-                                    custom_coefficient = iteration_coefficient = self.iter.get()
+                                    global iteration_coefficient
+                                    self.custom_coefficient = iteration_coefficient = self.iter.get()
                                     self.entryconfig(6, state=NORMAL, value=iteration_coefficient)
                                     self.change_iteration_count()
                                 Config(self.root, self, "iteration increase factor", self.iter, iteration_coefficient * 10e+4, 92000, 99999, True, (None, blur_sigma, brightness, spectrum_offset), apply)
 
+                        class blurMenu(Menu):
+                            def __init__(self, master: menuBar):
+                                super().__init__(master, tearoff=0)
+                                self.root = self.master.master.master
+                                self.blur = DoubleVar(value=0.96)
+
+                                self.add_radiobutton(label="Disabled", value=0, variable=self.blur, command=self.change_blur_sigma)
+                                self.add_separator()
+                                self.add_radiobutton(label="Very low", value=0.985, variable=self.blur, command=self.change_blur_sigma)
+                                self.add_radiobutton(label="Low", value=0.97, variable=self.blur, command=self.change_blur_sigma)
+                                self.add_radiobutton(label="Medium (default)", value=0.5, variable=self.blur, command=self.change_blur_sigma)
+                                self.add_radiobutton(label="High", value=0.95, variable=self.blur, command=self.change_blur_sigma)
+                                self.add_radiobutton(label="Very High", value=0.935, variable=self.blur, command=self.change_blur_sigma)
+                                self.add_separator()
+                                self.add_radiobutton(label="Custom", value=self.root.custom_blur_sigma, variable=self.blur, command=self.change_blur_sigma, state=DISABLED)
+                                self.add_command(label="Fine tune", command=self.fine_tune)
+
+                            def change_blur_sigma(self):
+                                global blur_sigma
+                                blur_sigma = self.blur.get()
+                                self.root.update_image()
+
+                            def fine_tune(self):
+                                def apply():
+                                    global blur_sigma
+                                    self.root.custom_blur_sigma = blur_sigma = self.blur.get()
+                                    self.entryconfig(7, state=NORMAL, value=blur_sigma)
+                                    self.change_blur_sigma()
+                                Config(self.root, self, "blur sigma", self.blur, 0.5, 0, 1, True, (iteration_coefficient, None, brightness, spectrum_offset), apply)
+                        
                         self.iterMenu = iterMenu(self)
+                        self.blurMenu = blurMenu(self)
 
                         self.add_cascade(label="Iteration", menu=self.iterMenu)
+                        self.add_cascade(label="Bluriness", menu=self.blurMenu)
                         self.add_separator()
                         self.add_checkbutton(label="Load low resolution first", variable=self.root.use_lod)
 
@@ -403,7 +433,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         tempfolder = config.tempFolder.get()
 
         self.zoom = 4.5
-        self.max_iters = initial_iteration_count
 
         fc = mpf(config.duration.get() * config.fps.get())
         zoom_coefficient = float((final_zoom / mpf(self.zoom)) ** (mpf(1) / fc))
@@ -438,7 +467,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
         for i in range(int(fc)):
-            mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+            mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
             self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
 
             self.ax.clear()
@@ -447,7 +476,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
 
             plt.imsave(tempfolder + f'\\{i}.png', gaussian_filter(self.rgb_colors, sigma=blur_sigma))
             self.zoom *= zoom_coefficient
-            self.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))
             config.progressBar.step()
             config.update()
 
@@ -651,12 +679,12 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         util = nvidia_smi.nvmlDeviceGetUtilizationRates(self.handle)
         mem = nvidia_smi.nvmlDeviceGetMemoryInfo(self.handle)
 
-        self.display.configure(text="Magnification: " + f"{(4.5 / self.zoom):e}" + "   Iterations: " + f"{self.max_iters:e}" + "   GPU Usage: " + str(util.gpu) + "%   Memory Usage: " + str(int(mem.used / 1048576)) + " MB")
+        self.display.configure(text="Magnification: " + f"{(4.5 / self.zoom):e}" + "   Iterations: " + f"{int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" + "   GPU Usage: " + str(util.gpu) + "%   Memory Usage: " + str(int(mem.used / 1048576)) + " MB")
     
         self.after(1000, self.update_info)
 
     def load_lod(self):
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
@@ -668,7 +696,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         if 0:
             self.update_image_cpu()
             return
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, self.max_iters, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+        print(iteration_coefficient)
+        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
         self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
@@ -683,7 +712,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         with concurrent.futures.ProcessPoolExecutor() as executor:
             futures = []
             for row in range(self.rgb_colors.shape[0]):
-                args = [row, self.zoom, self.offset, int(self.max_iters), spectrum, initial_spectrum, self.rgb_colors.shape[0], self.rgb_colors.shape[1]]
+                args = [row, self.zoom, self.offset, iteration_coefficient, spectrum, initial_spectrum, self.rgb_colors.shape[0], self.rgb_colors.shape[1]]
                 future = executor.submit(calculate_mandelbrot_row, args)
                 futures.append(future)
 
@@ -715,7 +744,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.offset = pickle.load(file).copy()
             self.zoom = pickle.load(file)
 
-        self.max_iters = initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))
         self.update_image_cpu()
 
     def center_point(self, event):
@@ -738,10 +766,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.after_cancel(self.load_image)
         if delta > 0:
             self.zoom *= zoom_coefficient
-            self.max_iters = int(self.max_iters / iteration_coefficient)
         else:
             self.zoom /= zoom_coefficient
-            self.max_iters = max(initial_iteration_count, int(self.max_iters * iteration_coefficient))
 
         if floor(log10(abs((4.5 / self.zoom)))) >= 14:
             self.alertLabel.pack_configure(side="top", pady=10)
@@ -756,7 +782,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
 
     def reset_zoom(self):
         self.zoom = 4.5
-        self.max_iters = initial_iteration_count
         self.update_image()
 
     def _on_mousewheel(self, event):
