@@ -19,7 +19,7 @@ import nvidia_smi, tkinter, tempfile, os
 import pickle, re, concurrent.futures
 import moviepy.video.io.ImageSequenceClip
 
-import time
+import time, timeit
 
 initial_iteration_count = 80
 
@@ -54,7 +54,6 @@ for i in range(6):
                 spectrum.append(np.array([255, 0, 255 - i]))
 spectrum = np.array(spectrum)
 spectrum_gpu = cuda.to_device(spectrum)
-print(time.time() - s, "seconds")
 
 initial_spectrum = []
 for i in range(256):
@@ -139,7 +138,7 @@ class Config(Toplevel):
     def update_preview(self):
         print(self.blur_sigma)
         self.applyButton.configure(state=DISABLED if self.var.get() == self.def_value else NORMAL)
-        mandelbrot_kernel[(64, 64), (32, 32)](self.root.zoom, self.root.offset, self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset)
+        mandelbrot_kernel[(5, 5), (32, 32)](self.root.zoom, self.root.center, self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset)
         self.root.preview_gpu.copy_to_host(self.root.preview)
         self.ax.clear()
         self.ax.imshow(gaussian_filter(self.root.preview, sigma=self.blur_sigma / 10e+3), extent=[-2.5, 1.5, -2, 2])
@@ -157,23 +156,26 @@ def mandelbrot_pixel(c, max_iters):
         z = z * z + c
     return 0
 
-@cuda.jit()
-def mandelbrot_kernel(zoom, offset, coefficient, output, spectrum, initial_spectrum, brightness, spectrum_offset):
+@cuda.jit
+def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spectrum, brightness, spectrum_offset):
     max_iters = initial_iteration_count / (coefficient ** (log(zoom / 4.5) / log(zoom_coefficient)))
     pixel_size = zoom / min(output.shape[0], output.shape[1])
     start_x, start_y = cuda.grid(2)
     grid_x, grid_y = cuda.gridsize(2)
+
+    x_center, y_center = center
+    x_offset = x_center - output.shape[1] / 2 * pixel_size
+    y_offset = y_center - output.shape[0] / 2 * pixel_size
+
     for i in range(start_x, output.shape[0], grid_x):
         for j in range(start_y, output.shape[1], grid_y):
-            imag = ((i - output.shape[0] / 2) * pixel_size - offset[0])
-            real = ((j - output.shape[1] / 2) * pixel_size - offset[1])
+            imag = (i * pixel_size + y_offset)
+            real = (j * pixel_size + x_offset)
             c = complex(real, imag)
 
             p = mandelbrot_pixel(c, max_iters)
             for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
                 output[i, j, k] = c
-
-mp.dps = 8
 
 def mandelbrot_pixel_cpu(c, max_iters):
     z = c
@@ -218,7 +220,7 @@ class MandelbrotVoyage(Tk):
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.draw()
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
-        self.offset = np.array([0, 0], dtype=np.float64)
+        self.center = np.array([0, 0], dtype=np.float64)
         self.zoom = 4.5
 
         self.custom_coefficient = 0
@@ -260,6 +262,8 @@ class MandelbrotVoyage(Tk):
         self.resize = None
         self.last_x, self.last_y = None, None
 
+        self.changeLocationUI = None
+
         class menuBar(Menu):
             def __init__(self, root: MandelbrotVoyage):
                 super().__init__(root, tearoff=0)
@@ -271,9 +275,6 @@ class MandelbrotVoyage(Tk):
                         super().__init__(master, tearoff=0)
                         self.root: MandelbrotVoyage = self.master.master
                         
-                        self.add_command(label="Save location", accelerator="Ctrl+C", command=self.root.save_loc)
-                        self.add_command(label="Load location", accelerator="Ctrl+L", command=self.root.load_loc)
-                        self.add_separator()
                         self.add_command(label="Take screenshot", accelerator="Ctrl+S", command=self.root.save_image)
                         self.add_separator()
                         self.add_command(label="Create zoom video", command=self.root.make_video)
@@ -405,14 +406,26 @@ class MandelbrotVoyage(Tk):
                         self.add_command(label="Zoom out", accelerator="Q", command=lambda: self.root.zoom_(-1))
                         self.add_separator()
                         self.add_command(label="Reset magnification", accelerator="R", command=self.root.reset_zoom)
+
+                class locationMenu(Menu):
+                    def __init__(self, master: menuBar):
+                        super().__init__(master, tearoff=0)
+                        self.root = self.master.master
+
+                        self.add_command(label="Save location", accelerator="Ctrl+C", command=self.root.save_loc)
+                        self.add_command(label="Load location", accelerator="Ctrl+L", command=self.root.load_loc)
+                        self.add_separator()
+                        self.add_command(label="Change location", command=self.root.change_loc)
                 
                 self.fileMenu = fileMenu(self)
                 self.settingsMenu = settingsMenu(self)
                 self.zoomMenu = zoomMenu(self)
+                self.locationMenu = locationMenu(self)
 
                 self.add_cascade(label = "File", menu=self.fileMenu)
                 self.add_cascade(label = "Edit", menu=self.settingsMenu)
                 self.add_cascade(label = "Zoom", menu=self.zoomMenu)
+                self.add_cascade(label = "Location", menu=self.locationMenu)
                 self.add_command(label = "About", command=self.about)
 
             def about(self):
@@ -520,7 +533,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
         for i in range(int(fc)):
-            mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+            mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, self.center, iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
             self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
 
             self.ax.clear()
@@ -591,7 +604,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 def check_tempfolder_validity(path)  -> bool:
                     return os.path.isdir(os.path.dirname(path))
 
-                self.destionationLabel = Label(self, text="Destionation:", foreground="red")
+                self.destionationLabel = Label(self, text="Destination:", foreground="red")
                 self.destinationVar = StringVar()
                 self.destinationVar.trace_add("write", lambda *args, **kwargs: self.destionationLabel.configure(
                     foreground="black" if check_destination_validity(self.destinationEntry.get()) else "red"))
@@ -629,23 +642,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
 
                 z = self.duration.get()
                 x = np.linspace(0, z, 1000)
-
-                self.fig = Figure()
-                self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-                self.ax = self.fig.add_subplot(111, aspect=1)
-                self.canvas = FigureCanvasTkAgg(self.fig, master=self)
-                self.canvas.draw()
-                self.canvas.get_tk_widget().place(x=220, y=70, height=165, width=165)
-
-                self.fig1, self.ax1 = plt.subplots(figsize=(6, 4), facecolor="#f0f0f0")
-                self.ax1.plot(x, self.velocity(x, z))
-                self.ax1.tick_params(labelbottom=True, labelleft=False, labelright=False, labeltop=False)
-                self.ax1.set_title(f'Zoom Velocity', fontdict={'fontfamily':'Segoe UI', 'fontsize':9})
-                self.ax1.grid(True)
-
-                self.canvas1 = FigureCanvasTkAgg(self.fig1, master=self)
-                self.canvas1.draw()
-                self.canvas1.get_tk_widget().place(x=365, y=70, height=185, width=165)
 
                 self.destionationLabel.place(x=10, y=8)
                 self.destinationEntry.place(x=115, y=7)
@@ -737,7 +733,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.after(1000, self.update_info)
 
     def load_lod(self):
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, self.center, iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
@@ -746,10 +742,11 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.canvas.draw()
 
     def update_image(self):
-        if 0:
-            self.update_image_cpu()
-            return
-        mandelbrot_kernel[(64, 64), (32, 32)](self.zoom, self.offset, iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+        try:
+            self.changeLocationUI.reVar.set(("%.100f" % self.center[0])[:102])
+            self.changeLocationUI.imVar.set(("%.100f" % self.center[1])[:102])
+        except: pass
+        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, self.center, iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
         self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
@@ -763,7 +760,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         with concurrent.futures.ProcessPoolExecutor() as executor:
             futures = []
             for row in range(self.rgb_colors.shape[0]):
-                args = [row, self.zoom, self.offset, iteration_coefficient, spectrum, initial_spectrum, self.rgb_colors.shape[0], self.rgb_colors.shape[1]]
+                args = [row, self.zoom, self.center, iteration_coefficient, spectrum, initial_spectrum, self.rgb_colors.shape[0], self.rgb_colors.shape[1]]
                 future = executor.submit(calculate_mandelbrot_row, args)
                 futures.append(future)
         
@@ -792,7 +789,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         if not path:
             return
         with open(path, 'wb') as file:
-            pickle.dump(self.offset, file, pickle.HIGHEST_PROTOCOL)
+            pickle.dump(self.center, file, pickle.HIGHEST_PROTOCOL)
             pickle.dump(self.zoom,   file, pickle.HIGHEST_PROTOCOL)
 
     def load_loc(self):
@@ -800,24 +797,74 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         if not path:
             return
         with open(path, 'rb') as file:
-            self.offset = pickle.load(file).copy()
+            self.center = pickle.load(file).copy()
             self.zoom = pickle.load(file)
 
-        self.update_image_cpu()
+        self.update_image()
+
+    def change_loc(self):
+        class ChangeLocation(Toplevel):
+            def __init__(self, master: MandelbrotVoyage):
+                super().__init__(master)
+                self.root = master
+
+                self.wm_title("Change location")
+                self.wm_geometry("770x100")
+                self.wm_resizable(height=False, width=False)
+
+                self.reVar = StringVar(self, value=("%.100f" % self.root.center[0])[:102])
+                self.tr1 = self.reVar.trace_add('write', lambda *args, **kwargs: self.on_entryUpdate())
+                self.imVar = StringVar(self, value=("%.100f" % self.root.center[1])[:102])
+                self.tr2 = self.imVar.trace_add('write', lambda *args, **kwargs: self.on_entryUpdate())
+
+                Label(self, text="Re:").place(x=8, y=10)
+                Label(self, text="Im:").place(x=8, y=41)
+
+                self.re = Entry(self, width=103, textvariable=self.reVar, font=("Consolas", 9))
+                self.re.place(x=34, y=8)
+                self.im = Entry(self, width=103, textvariable=self.imVar, font=("Consolas", 9))
+                self.im.place(x=34, y=39)
+
+                self.apply  = Button(self, text="Apply",  width=20, state=DISABLED, command=self.on_apply, takefocus=0)
+                self.revert = Button(self, text="Revert", width=20, state=DISABLED, command=self.on_revert, takefocus=0)
+                self.cancel = Button(self, text="Cancel", width=20, command=self.on_close, takefocus=0)
+                self.apply.place(x=10, y=67)
+                self.revert.place(x=147, y=67)
+                self.cancel.place(x=284, y=67)
+
+                self.wm_protocol("WM_DELETE_WINDOW", lambda *args, **kwargs: self.on_close())
+                self.focus_force()
+                self.wm_transient(master)
+            
+            def on_entryUpdate(self):
+                s = NORMAL if self.reVar.get() != ("%.100f" % self.root.center[0])[:102] or self.imVar.get() != ("%.100f" % self.root.center[1])[:102] else DISABLED
+                self.apply.configure(state=s)
+                self.revert.configure(state=s)
+            def on_apply(self):
+                self.root.center = np.array([float(self.reVar.get()), float(self.imVar.get())], dtype=np.float64)
+                self.on_entryUpdate()
+                self.root.update_image()
+                self.on_close()
+            def on_revert(self):
+                self.reVar.set(("%.100f" % self.root.center[0])[:102])
+                self.imVar.set(("%.100f" % self.root.center[1])[:102])
+                self.on_entryUpdate()
+            def on_close(self):
+                self.reVar.trace_remove("write", self.tr1)
+                self.imVar.trace_remove("write", self.tr2)
+                self.destroy()
+
+        self.changeLocationUI = ChangeLocation(self)
+        self.changeLocationUI.mainloop()
+        self.changeLocationUI = None
 
     def center_point(self, event):
-        dx = (event.x - self.width / 2) / self.width
-        dy = (self.height / 2 - event.y) / self.height
+        pixel_size = self.zoom / min(self.height, self.width)
+        print("({}, {}), ({}, {})".format(self.center[0], self.center[1], event.x, event.y))
+        self.center[0] -= (self.width  / 2 - event.x) * pixel_size
+        self.center[1] += (self.height / 2 - event.y) * pixel_size
 
-        # adjust the offset based on the aspect ratio
-        if self.width > self.height:
-            aspect_ratio = self.width / self.height
-            self.offset -= np.array([dy * self.zoom, dx * self.zoom * aspect_ratio], dtype=np.float64)
-        else:
-            aspect_ratio = self.height / self.width
-            self.offset -= np.array([dy * self.zoom * aspect_ratio, dx * self.zoom], dtype=np.float64)
-
-        self.last_x, self.last_y = event.x, event.y
+        # Update the image with the new center
         self.update_image()
 
     def zoom_(self, delta):
@@ -869,10 +916,10 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             if self.load_image:
                 self.after_cancel(self.load_image)
             if self.last_x and self.last_y:
-                dx = -(event.x - self.last_x)
-                dy = -(self.last_y - event.y)
+                dy = (event.x - self.last_x)
+                dx = (self.last_y - event.y)
                 w, h = self.ax.get_xlim()[1] - self.ax.get_xlim()[0], self.ax.get_ylim()[1] - self.ax.get_ylim()[0]
-                self.offset -= np.array([dy / self.fig.get_dpi() / w * self.zoom, dx / self.fig.get_dpi() / h * self.zoom], dtype=np.float64)
+                self.center -= np.array([dy / self.fig.get_dpi() / w * self.zoom, dx / self.fig.get_dpi() / h * self.zoom], dtype=np.float64)
                 self.last_x, self.last_y = event.x, event.y
 
                 if self.use_lod.get():
