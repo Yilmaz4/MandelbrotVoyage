@@ -18,8 +18,7 @@ import numpy as np
 import nvidia_smi, tkinter, tempfile, os
 import pickle, re, concurrent.futures
 import moviepy.video.io.ImageSequenceClip
-
-import time, timeit
+import time
 
 initial_iteration_count = 80
 
@@ -28,7 +27,7 @@ blur_sigma = 0.0
 brightness = 6
 spectrum_offset = 0
 
-zoom_coefficient = 0.9
+zoom_coefficient = 0.7
 
 s = time.time()
 spectrum = []
@@ -138,7 +137,7 @@ class Config(Toplevel):
     def update_preview(self):
         print(self.blur_sigma)
         self.applyButton.configure(state=DISABLED if self.var.get() == self.def_value else NORMAL)
-        mandelbrot_kernel[(5, 5), (32, 32)](self.root.zoom, self.root.center, self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset)
+        mandelbrot_kernel[(5, 5), (32, 32)](self.root.zoom, [float(x) for x in self.root.center], self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset)
         self.root.preview_gpu.copy_to_host(self.root.preview)
         self.ax.clear()
         self.ax.imshow(gaussian_filter(self.root.preview, sigma=self.blur_sigma / 10e+3), extent=[-2.5, 1.5, -2, 2])
@@ -177,6 +176,8 @@ def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spect
             for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
                 output[i, j, k] = c
 
+mp.dps = 200
+
 def mandelbrot_pixel_cpu(c, max_iters):
     z = c
     for i in range(max_iters):
@@ -186,23 +187,33 @@ def mandelbrot_pixel_cpu(c, max_iters):
     return 0
 
 def calculate_mandelbrot_row(args):
-    row, zoom, offset, coefficient, spectrum, initial_spectrum, h, w = args
+    row, zoom, center, coefficient, spectrum, initial_spectrum, h, w, brightness = args
     max_iters = initial_iteration_count / (coefficient ** (log(zoom / 4.5) / log(zoom_coefficient)))
     image_row = np.empty((1, w, 3), dtype=np.uint8)
 
     pixel_size = mpf(zoom) / mpf(min(h, w))
-    print(row)
+    x_center, y_center = center
+    x_offset = x_center - w / 2 * pixel_size
+    y_offset = y_center - h / 2 * pixel_size
 
     for j in range(w):
-        imag = mpf((row - h / 2) * pixel_size - offset[0])
-        real = mpf((j - w / 2) * pixel_size - offset[1])
+        imag = mpf(row * pixel_size + y_offset)
+        real = mpf(j * pixel_size + x_offset)
         c = mpc(real, imag)
 
         p = mandelbrot_pixel_cpu(c, int(max_iters))
         for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
             image_row[0, j, k] = c
-
+    print(row)
     return row, image_row
+
+def calculate_mandelbrot_rows(args):
+    start_row, end_row, zoom, center, h, w = args
+    print("hi")
+    results = []
+    for row in range(start_row, end_row):
+        results.append(calculate_mandelbrot_row((row, zoom, center, iteration_coefficient, spectrum, initial_spectrum, h, w, brightness))[1])
+    return start_row, results
 
 class MandelbrotVoyage(Tk):
     def __init__(self):
@@ -220,7 +231,7 @@ class MandelbrotVoyage(Tk):
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.draw()
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
-        self.center = np.array([0, 0], dtype=np.float64)
+        self.center = np.array([mpf(0), mpf(0)])
         self.zoom = 4.5
 
         self.custom_coefficient = 0
@@ -280,6 +291,7 @@ class MandelbrotVoyage(Tk):
                         self.add_command(label="Create zoom video", command=self.root.make_video)
                         self.add_separator()
                         self.add_command(label="Render with CPU", command=self.root.update_image_cpu)
+                        self.add_command(label="Render with CPU 2", command=self.root.update_image_cpu_2)
                         self.add_command(label="Exit", accelerator="Alt+F4", command=lambda: os._exit(0))
 
                 class settingsMenu(Menu):
@@ -373,16 +385,7 @@ class MandelbrotVoyage(Tk):
                                     self.root.custom_brightness = brightness
                                     self.entryconfig(6, state=NORMAL, value=self.brightness.get())
                                 self.brightness.set(self.brightness.get() * 10e+3)
-                                Config(self.root, self, "color complexity", self.brightness, brightness * 10e+3, 40 * 10e+3, 10e+3, True, (iteration_coefficient, blur_sigma, None, spectrum_offset), apply)
-
-                        def spectrum_offset_finetune():
-                            var = IntVar(value=0)
-                            def apply():
-                                global spectrum_offset
-                                spectrum_offset = int(var.get())
-                                self.root.update_image()
-                                self.entryconfig(6, state=NORMAL, value=var.get())
-                            Config(self.root, self, "color spectrum offset", var, spectrum_offset, 1536, 0, False, (iteration_coefficient, blur_sigma, brightness, None), apply)
+                                Config(self.root, self, "color complexity", self.brightness, brightness * 10e+3, 27.5 * 10e+3, 10e+3, True, (iteration_coefficient, blur_sigma, None, spectrum_offset), apply)
 
                         self.iterMenu = iterMenu(self)
                         self.blurMenu = blurMenu(self)
@@ -390,10 +393,9 @@ class MandelbrotVoyage(Tk):
 
                         self.spectrum_offset_var = IntVar(value=0)
 
-                        self.add_cascade(label="Iteration", menu=self.iterMenu)
+                        self.add_cascade(label="Iteration count", menu=self.iterMenu)
                         self.add_cascade(label="Bluriness", menu=self.blurMenu)
                         self.add_cascade(label="Color complexity", menu=self.brightness)
-                        self.add_checkbutton(label="Color spectrum offset", variable=self.spectrum_offset_var, command=spectrum_offset_finetune)
                         self.add_separator()
                         self.add_checkbutton(label="Load low resolution first", variable=self.root.use_lod)
 
@@ -533,8 +535,27 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
         for i in range(int(fc)):
-            mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, self.center, iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
-            self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
+            if floor(log10(abs((4.5 / self.zoom)))) <= 13:
+                mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+                self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
+            else:
+                num_threads = 16
+                rows_per_thread = self.rgb_colors.shape[0] // num_threads
+                extra_rows = self.rgb_colors.shape[0] % num_threads
+
+                with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
+                    futures = []
+                    for i in range(num_threads):
+                        start_row = i * rows_per_thread
+                        if i < extra_rows:
+                            rows_for_thread = rows_per_thread + 1
+                        else:
+                            rows_for_thread = rows_per_thread
+
+                        end_row = start_row + rows_for_thread
+                        futures.append(executor.submit(self.calculate_mandelbrot_rows, start_row, end_row))
+
+                    concurrent.futures.wait(futures)
 
             self.ax.clear()
             self.ax.imshow(gaussian_filter(self.rgb_colors, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2])
@@ -733,7 +754,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.after(1000, self.update_info)
 
     def load_lod(self):
-        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, self.center, iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
@@ -743,10 +764,10 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
 
     def update_image(self):
         try:
-            self.changeLocationUI.reVar.set(("%.100f" % self.center[0])[:102])
-            self.changeLocationUI.imVar.set(("%.100f" % self.center[1])[:102])
+            self.changeLocationUI.reVar.set(("%.100f" % float(self.center[0]))[:102])
+            self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
         except: pass
-        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, self.center, iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
         self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
@@ -757,10 +778,34 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.load_image = None
     
     def update_image_cpu(self):
+        s = time.time()
+        num_threads = 16
+        rows_per_thread = self.rgb_colors.shape[0] // num_threads
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            futures = []
+            for i in range(num_threads):
+                args = (i * rows_per_thread, (i + 1) * rows_per_thread, self.zoom, self.center, self.rgb_colors.shape[0], self.rgb_colors.shape[1])
+                future = executor.submit(calculate_mandelbrot_rows, args)
+                futures.append(future)
+            concurrent.futures.wait(futures)
+            for future in futures:
+                result = future.result()
+                for i, j in zip(range(result[0], result[0] + rows_per_thread), range(rows_per_thread)):
+                    self.rgb_colors[i] = result[1][j]
+
+        self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
+        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
+        self.ax.set_aspect(self.height / self.width)
+        self.canvas.draw()
+        self.update_idletasks()
+        print(time.time() - s, "seconds")
+
+    def update_image_cpu_2(self):
+        s = time.time()
         with concurrent.futures.ProcessPoolExecutor() as executor:
             futures = []
             for row in range(self.rgb_colors.shape[0]):
-                args = [row, self.zoom, self.center, iteration_coefficient, spectrum, initial_spectrum, self.rgb_colors.shape[0], self.rgb_colors.shape[1]]
+                args = [row, self.zoom, self.center, iteration_coefficient, spectrum, initial_spectrum, self.rgb_colors.shape[0], self.rgb_colors.shape[1], brightness]
                 future = executor.submit(calculate_mandelbrot_row, args)
                 futures.append(future)
         
@@ -776,7 +821,30 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
         self.canvas.draw()
-        self.update_idletasks()  # Refresh the Tkinter window
+        self.update_idletasks()
+        print(time.time() - s, "seconds")
+
+    """def calculate_mandelbrot_parallel(self):
+        num_threads = 16
+        rows_per_thread = self.rgb_colors.shape[0] // num_threads
+        extra_rows = self.rgb_colors.shape[0] % num_threads
+
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            futures = []
+            for i in range(num_threads):
+                args = [i * rows_per_thread, (i + 1) * rows_per_thread, self.zoom, self.center, self.rgb_colors.shape[0], self.rgb_colors.shape[1], self.rgb_colors]
+                future = executor.submit(calculate_mandelbrot_rows, args)
+                futures.append(future)
+
+            concurrent.futures.wait(futures)
+
+        self.ax.clear()
+        self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
+        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
+        self.ax.set_aspect(self.height / self.width)
+        self.canvas.draw()
+        self.update_idletasks()"""
+
 
     def save_image(self):
         path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage %H.%M.%S %d-%m-%y"), defaultextension='.png', filetypes=[('PNG (*.png)', '*.png'), ('JPEG (*.jpg)', '*.jpg')], title="Save the screenshot")
@@ -800,7 +868,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.center = pickle.load(file).copy()
             self.zoom = pickle.load(file)
 
-        self.update_image()
+        self.update_image_cpu()
 
     def change_loc(self):
         class ChangeLocation(Toplevel):
@@ -812,9 +880,9 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.wm_geometry("770x100")
                 self.wm_resizable(height=False, width=False)
 
-                self.reVar = StringVar(self, value=("%.100f" % self.root.center[0])[:102])
+                self.reVar = StringVar(self, value=("%.100f" % float(self.root.center[0]))[:102])
                 self.tr1 = self.reVar.trace_add('write', lambda *args, **kwargs: self.on_entryUpdate())
-                self.imVar = StringVar(self, value=("%.100f" % self.root.center[1])[:102])
+                self.imVar = StringVar(self, value=("%.100f" % float(self.root.center[1]))[:102])
                 self.tr2 = self.imVar.trace_add('write', lambda *args, **kwargs: self.on_entryUpdate())
 
                 Label(self, text="Re:").place(x=8, y=10)
@@ -837,7 +905,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.wm_transient(master)
             
             def on_entryUpdate(self):
-                s = NORMAL if self.reVar.get() != ("%.100f" % self.root.center[0])[:102] or self.imVar.get() != ("%.100f" % self.root.center[1])[:102] else DISABLED
+                s = NORMAL if self.reVar.get() != ("%.100f" % float(self.root.center[0]))[:102] or self.imVar.get() != ("%.100f" % self.root.center[1])[:102] else DISABLED
                 self.apply.configure(state=s)
                 self.revert.configure(state=s)
             def on_apply(self):
@@ -846,8 +914,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.root.update_image()
                 self.on_close()
             def on_revert(self):
-                self.reVar.set(("%.100f" % self.root.center[0])[:102])
-                self.imVar.set(("%.100f" % self.root.center[1])[:102])
+                self.reVar.set(("%.100f" % float(self.root.center[0]))[:102])
+                self.imVar.set(("%.100f" % float(self.root.center[1]))[:102])
                 self.on_entryUpdate()
             def on_close(self):
                 self.reVar.trace_remove("write", self.tr1)
@@ -875,7 +943,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         else:
             self.zoom /= zoom_coefficient
 
-        if floor(log10(abs((4.5 / self.zoom)))) >= 14:
+        if floor(log10(abs((4.5 / self.zoom)))) >= 13:
             self.alertLabel.pack_configure(side="top", pady=10)
         else:
             self.alertLabel.pack_forget()
