@@ -27,7 +27,7 @@ blur_sigma = 0.0
 brightness = 6
 spectrum_offset = 0
 
-zoom_coefficient = 0.7
+zoom_coefficient = 0.9
 
 s = time.time()
 spectrum = []
@@ -135,9 +135,8 @@ class Config(Toplevel):
         self.destroy()
     
     def update_preview(self):
-        print(self.blur_sigma)
         self.applyButton.configure(state=DISABLED if self.var.get() == self.def_value else NORMAL)
-        mandelbrot_kernel[(5, 5), (32, 32)](self.root.zoom, [float(x) for x in self.root.center], self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset)
+        mandelbrot_kernel[(5, 5), (32, 32)](self.root.zoom, np.array([float(x) for x in self.root.center]), self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset)
         self.root.preview_gpu.copy_to_host(self.root.preview)
         self.ax.clear()
         self.ax.imshow(gaussian_filter(self.root.preview, sigma=self.blur_sigma / 10e+3), extent=[-2.5, 1.5, -2, 2])
@@ -204,12 +203,10 @@ def calculate_mandelbrot_row(args):
         p = mandelbrot_pixel_cpu(c, int(max_iters))
         for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
             image_row[0, j, k] = c
-    print(row)
     return row, image_row
 
 def calculate_mandelbrot_rows(args):
     start_row, end_row, zoom, center, h, w = args
-    print("hi")
     results = []
     for row in range(start_row, end_row):
         results.append(calculate_mandelbrot_row((row, zoom, center, iteration_coefficient, spectrum, initial_spectrum, h, w, brightness))[1])
@@ -364,11 +361,11 @@ class MandelbrotVoyage(Tk):
                                 self.root = self.master.master.master
                                 self.brightness = DoubleVar(value=0.96)
 
-                                self.add_radiobutton(label="Very low", value=1900, variable=self.brightness, command=self.change_brightness)
-                                self.add_radiobutton(label="Low", value=3750, variable=self.brightness, command=self.change_brightness)
-                                self.add_radiobutton(label="Medium (default)", value=5000, variable=self.brightness, command=self.change_brightness)
-                                self.add_radiobutton(label="High", value=6300, variable=self.brightness, command=self.change_brightness)
-                                self.add_radiobutton(label="Very High", value=8100, variable=self.brightness, command=self.change_brightness)
+                                self.add_radiobutton(label="Very low", value=19000, variable=self.brightness, command=self.change_brightness)
+                                self.add_radiobutton(label="Low", value=37500, variable=self.brightness, command=self.change_brightness)
+                                self.add_radiobutton(label="Medium (default)", value=50000, variable=self.brightness, command=self.change_brightness)
+                                self.add_radiobutton(label="High", value=63000, variable=self.brightness, command=self.change_brightness)
+                                self.add_radiobutton(label="Very High", value=81000, variable=self.brightness, command=self.change_brightness)
                                 self.add_separator()
                                 self.add_radiobutton(label="Custom", value=self.root.custom_brightness, variable=self.brightness, command=self.change_brightness, state=DISABLED)
                                 self.add_command(label="Fine tune", command=self.fine_tune)
@@ -535,7 +532,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
         for i in range(int(fc)):
-            if floor(log10(abs((4.5 / self.zoom)))) <= 13:
+            #if floor(log10(abs((4.5 / self.zoom)))) <= 13:
+            if True:
                 mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
                 self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
             else:
@@ -798,7 +796,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.ax.set_aspect(self.height / self.width)
         self.canvas.draw()
         self.update_idletasks()
-        print(time.time() - s, "seconds")
 
     def update_image_cpu_2(self):
         s = time.time()
@@ -822,7 +819,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.ax.set_aspect(self.height / self.width)
         self.canvas.draw()
         self.update_idletasks()
-        print(time.time() - s, "seconds")
 
     """def calculate_mandelbrot_parallel(self):
         num_threads = 16
@@ -928,7 +924,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
 
     def center_point(self, event):
         pixel_size = self.zoom / min(self.height, self.width)
-        print("({}, {}), ({}, {})".format(self.center[0], self.center[1], event.x, event.y))
         self.center[0] -= (self.width  / 2 - event.x) * pixel_size
         self.center[1] += (self.height / 2 - event.y) * pixel_size
 
