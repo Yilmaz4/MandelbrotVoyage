@@ -771,6 +771,10 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
         self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
+        coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
+        self.ax.text(-2.456, 1.94, f"Re: {'-' if self.center[0] < 0 else ' '}{coords[0] + '0' * (100 - len(coords[0]))}\n" +
+                                 f"Im: {'-' if self.center[0] < 0 else ' '}{coords[1] + '0' * (100 - len(coords[1]))}",
+                     color="green", fontfamily="monospace", fontweight=10, verticalalignment="top")
         self.canvas.draw()
 
         self.load_image = None
