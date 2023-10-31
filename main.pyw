@@ -29,6 +29,10 @@ spectrum_offset = 0
 
 zoom_coefficient = 0.9
 
+show_coordinates = True
+show_zoom = True
+show_iteration_count = True
+
 s = time.time()
 spectrum = []
 for i in range(6):
@@ -256,10 +260,6 @@ class MandelbrotVoyage(Tk):
 
         self.handle = nvidia_smi.nvmlDeviceGetHandleByIndex(0)
 
-        self.display = tkinter.Label(self, bg="black", fg="white")
-        self.update_info()
-        self.display.place(relx=0.5, rely=1.0, anchor=S, width=self.width)
-
         self.alertLabel = tkinter.Label(self, bg="black", fg="red",
             text="Higher Precision Required - Use \"Render with CPU\"")
 
@@ -463,8 +463,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.wm_protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.bind("<Configure>", self.on_resize)
-
-        self.after(1000, self.update_info)
 
     def on_close(self):
         self.destroy()
@@ -743,14 +741,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             
         video = Video(self)
 
-    def update_info(self):
-        util = nvidia_smi.nvmlDeviceGetUtilizationRates(self.handle)
-        mem = nvidia_smi.nvmlDeviceGetMemoryInfo(self.handle)
-
-        self.display.configure(text="Magnification: " + f"{(4.5 / self.zoom):e}" + "   Iterations: " + f"{int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" + "   GPU Usage: " + str(util.gpu) + "%   Memory Usage: " + str(int(mem.used / 1048576)) + " MB")
-    
-        self.after(1000, self.update_info)
-
     def load_lod(self):
         mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
@@ -772,79 +762,14 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
-        self.ax.text(-2.456, 1.94, f"Re: {'-' if self.center[0] < 0 else ' '}{coords[0] + '0' * (100 - len(coords[0]))}\n" +
-                                 f"Im: {'-' if self.center[0] < 0 else ' '}{coords[1] + '0' * (100 - len(coords[1]))}",
-                     color="green", fontfamily="monospace", fontweight=10, verticalalignment="top")
+        self.ax.text(-2.456, 1.96, ((f"        Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}\n" +
+                                  f"        Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}\n") if show_coordinates else '') +
+                                 (f"      Zoom:  {(4.5 / self.zoom):e}\n" if show_zoom else '') +
+                                 (f"Iterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else ''),
+                     color="green", fontfamily="monospace", fontweight=10, verticalalignment="top", size=7, bbox=dict(facecolor='black', alpha=0.5))
         self.canvas.draw()
 
         self.load_image = None
-    
-    def update_image_cpu(self):
-        s = time.time()
-        num_threads = 16
-        rows_per_thread = self.rgb_colors.shape[0] // num_threads
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            futures = []
-            for i in range(num_threads):
-                args = (i * rows_per_thread, (i + 1) * rows_per_thread, self.zoom, self.center, self.rgb_colors.shape[0], self.rgb_colors.shape[1])
-                future = executor.submit(calculate_mandelbrot_rows, args)
-                futures.append(future)
-            concurrent.futures.wait(futures)
-            for future in futures:
-                result = future.result()
-                for i, j in zip(range(result[0], result[0] + rows_per_thread), range(rows_per_thread)):
-                    self.rgb_colors[i] = result[1][j]
-
-        self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
-        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
-        self.ax.set_aspect(self.height / self.width)
-        self.canvas.draw()
-        self.update_idletasks()
-
-    def update_image_cpu_2(self):
-        s = time.time()
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            futures = []
-            for row in range(self.rgb_colors.shape[0]):
-                args = [row, self.zoom, self.center, iteration_coefficient, spectrum, initial_spectrum, self.rgb_colors.shape[0], self.rgb_colors.shape[1], brightness]
-                future = executor.submit(calculate_mandelbrot_row, args)
-                futures.append(future)
-        
-            concurrent.futures.wait(futures)
-
-            for future in futures:
-                result = future.result()
-                row = result[0]
-                image_row = result[1]
-                self.rgb_colors[row] = image_row
-
-        self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
-        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
-        self.ax.set_aspect(self.height / self.width)
-        self.canvas.draw()
-        self.update_idletasks()
-
-    """def calculate_mandelbrot_parallel(self):
-        num_threads = 16
-        rows_per_thread = self.rgb_colors.shape[0] // num_threads
-        extra_rows = self.rgb_colors.shape[0] % num_threads
-
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            futures = []
-            for i in range(num_threads):
-                args = [i * rows_per_thread, (i + 1) * rows_per_thread, self.zoom, self.center, self.rgb_colors.shape[0], self.rgb_colors.shape[1], self.rgb_colors]
-                future = executor.submit(calculate_mandelbrot_rows, args)
-                futures.append(future)
-
-            concurrent.futures.wait(futures)
-
-        self.ax.clear()
-        self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
-        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
-        self.ax.set_aspect(self.height / self.width)
-        self.canvas.draw()
-        self.update_idletasks()"""
-
 
     def save_image(self):
         path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage %H.%M.%S %d-%m-%y"), defaultextension='.png', filetypes=[('PNG (*.png)', '*.png'), ('JPEG (*.jpg)', '*.jpg')], title="Save the screenshot")
@@ -868,7 +793,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.center = pickle.load(file).copy()
             self.zoom = pickle.load(file)
 
-        self.update_image_cpu()
+        self.update_image()
 
     def change_loc(self):
         class ChangeLocation(Toplevel):
