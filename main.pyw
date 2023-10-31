@@ -760,11 +760,11 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
-        self.ax.text(-2.456, 1.96, ((f"        Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}\n" +
-                                  f"        Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}\n") if show_coordinates else '') +
-                                 (f"      Zoom:  {(4.5 / self.zoom):e}\n" if show_zoom else '') +
+        self.ax.text(-2.5, 2, ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}\n" +
+                                  f"{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}\n") if show_coordinates else '') +
+                                 (f"{'' * 6}Zoom:  {(4.5 / self.zoom):e}\n" if show_zoom else '') +
                                  (f"Iterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else ''),
-                     color="green", fontfamily="monospace", fontweight=10, verticalalignment="top", size=7, bbox=dict(facecolor='black', alpha=0.5))
+                     color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
 
         self.load_image = None
