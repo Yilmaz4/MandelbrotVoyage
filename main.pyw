@@ -287,8 +287,6 @@ class MandelbrotVoyage(Tk):
                         self.add_separator()
                         self.add_command(label="Create zoom video", command=self.root.make_video)
                         self.add_separator()
-                        self.add_command(label="Render with CPU", command=self.root.update_image_cpu)
-                        self.add_command(label="Render with CPU 2", command=self.root.update_image_cpu_2)
                         self.add_command(label="Exit", accelerator="Alt+F4", command=lambda: os._exit(0))
 
                 class settingsMenu(Menu):
