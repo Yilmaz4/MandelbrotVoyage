@@ -80,7 +80,11 @@ class Config(Toplevel):
         if default[2] is not None: self._brightness  *= 10e+3
 
         self.wm_title("Fine tune " + name)
-        self.wm_geometry("352x300")
+        w = 352
+        h = 300 
+        x = self.master.winfo_x()
+        y = self.master.winfo_y()
+        self.wm_geometry("%dx%d+%d+%d" % (w, h, x + 100, y + 100))
         self.wm_resizable(height=False, width=False)
 
         self.var = IntVar(value=def_value)
@@ -232,7 +236,7 @@ class MandelbrotVoyage(Tk):
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.draw()
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
-        self.center = np.array([mpf(0), mpf(0)])
+        self.center = np.array([mpf("-0.4" + "0" * 180), mpf(0)])
         self.zoom = 4.5
 
         self.custom_coefficient = 0
@@ -411,6 +415,8 @@ class MandelbrotVoyage(Tk):
 
                         self.add_command(label="Save location", accelerator="Ctrl+C", command=self.root.save_loc)
                         self.add_command(label="Load location", accelerator="Ctrl+L", command=self.root.load_loc)
+                        self.add_separator()
+                        self.add_command(label="Reset location", command=self.root.reset_loc)
                         self.add_separator()
                         self.add_command(label="Change location", command=self.root.change_loc)
                 
@@ -792,6 +798,10 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.zoom = pickle.load(file)
 
         self.update_image()
+    
+    def reset_loc(self):
+        self.center = np.array([mpf("-0.4" + "0" * 180), mpf(0)])
+        self.update_image()
 
     def change_loc(self):
         class ChangeLocation(Toplevel):
@@ -832,7 +842,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.apply.configure(state=s)
                 self.revert.configure(state=s)
             def on_apply(self):
-                self.root.center = np.array([float(self.reVar.get()), float(self.imVar.get())], dtype=np.float64)
+                self.root.center = np.array([mpf(self.reVar.get()), mpf(self.imVar.get())])
                 self.on_entryUpdate()
                 self.root.update_image()
                 self.on_close()
