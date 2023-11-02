@@ -180,8 +180,12 @@ def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spect
             c = complex(real, imag)
 
             p = mandelbrot_pixel(c, max_iters)
-            for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
-                output[i, j, k] = c
+            if p != 0:
+                for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
+                    output[i, j, k] = c
+            else:
+                for k in range(3):
+                    output[i, j, k] = 0
 
 mp.dps = 200
 
@@ -229,6 +233,7 @@ class MandelbrotVoyage(Tk):
         self.wm_title("Mandelbrot Voyage")
         self.wm_geometry(f"{self.width}x{self.height}")
         self.configure(bg="black")
+        self.wm_iconbitmap("icon.ico")
 
         self.fig = Figure()
         self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
