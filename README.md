@@ -6,7 +6,12 @@ Mandelbrot Voyage is a Python app where you can explore the Mandelbrot set with 
 
 ## Gallery
 ![gallery](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/ceb944ba-4517-4526-965d-b78778bb3b88)
-![customization](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/ba554334-5586-4eb2-8c4b-0b90faf13e3e)
+
+### Easily create a zoom video
+![Screenshot 2023-11-04 180912](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/4ccf2d00-99e0-4180-bb7c-336d99620c60)
+### High customizability
+![Screenshot 2023-11-04 180323](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/97468c22-d61c-490a-9dfb-5125f3518070)
+
 
 
 The most you can zoom in is 10^14 due to the limiations of floating point numbers. I do plan to use a library to increase the precision, however the library does not support CUDA.
