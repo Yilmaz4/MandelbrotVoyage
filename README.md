@@ -1,6 +1,6 @@
 # Mandelbrot Voyage
 
-Mandelbrot Voyage is a Python app where you can explore the Mandelbrot set with high customizability. GPU is used for calculations, so it is much faster compared to the traditional method of using the CPU.
+Mandelbrot Voyage is a program written in Python and Tkinter where you can explore the Mandelbrot set with high customizability and speed. GPU is used for calculations, so it is much faster compared to the traditional method of using the CPU.
 
 ![Screenshot 2023-11-03 235207](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/3a103353-6e5f-4f40-bb29-da16681de6f7)
 
