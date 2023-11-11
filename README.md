@@ -8,11 +8,9 @@ Mandelbrot Voyage is a program written in Python and Tkinter where you can explo
 ![gallery](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/ceb944ba-4517-4526-965d-b78778bb3b88)
 
 ### Easily create a zoom video
-![Screenshot 2023-11-04 180912](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/4ccf2d00-99e0-4180-bb7c-336d99620c60)
+![video](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/bfa78158-c7f9-4550-823c-28d9ab447d74)
 ### High customizability
-![Screenshot 2023-11-04 180323](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/97468c22-d61c-490a-9dfb-5125f3518070)
-
-
+![customization](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/2cf1b83c-66f0-4873-96e6-c31070d6715f)
 
 The most you can zoom in is 10^14 due to the limiations of floating point numbers. I do plan to use a library to increase the precision, however the library does not support CUDA.
 
