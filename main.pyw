@@ -1,5 +1,5 @@
 from tkinter import *
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, colorchooser
 TkLabel = Label
 from tkinter.ttk import *
 
@@ -26,12 +26,14 @@ iteration_coefficient = 0.96
 blur_sigma = 0.0
 brightness = 6
 spectrum_offset = 0
+inset_color = np.array([0, 0, 0])
 
 zoom_coefficient = 0.9
 
 show_coordinates = True
 show_zoom = True
-show_iteration_count = True
+show_iteration_count = False
+
 
 s = time.time()
 spectrum = []
@@ -144,7 +146,7 @@ class Config(Toplevel):
     
     def update_preview(self):
         self.applyButton.configure(state=DISABLED if self.var.get() == self.def_value else NORMAL)
-        mandelbrot_kernel[(5, 5), (32, 32)](self.root.zoom, np.array([float(x) for x in self.root.center]), self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset)
+        mandelbrot_kernel[(5, 5), (32, 32)](self.root.zoom, np.array([float(x) for x in self.root.center]), self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset, inset_color)
         self.root.preview_gpu.copy_to_host(self.root.preview)
         self.ax.clear()
         self.ax.imshow(gaussian_filter(self.root.preview, sigma=self.blur_sigma / 10e+3), extent=[-2.5, 1.5, -2, 2])
@@ -158,12 +160,12 @@ def mandelbrot_pixel(c, max_iters):
     z: complex = c
     for i in range(max_iters):
         if (z.real ** 2 + z.imag ** 2) >= 4:
-            return i
+            return i if z != c else 1
         z = z * z + c
     return 0
 
 @cuda.jit
-def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spectrum, brightness, spectrum_offset):
+def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spectrum, brightness, spectrum_offset, inset_color):
     max_iters = initial_iteration_count / (coefficient ** (log(zoom / 4.5) / log(zoom_coefficient)))
     pixel_size = zoom / min(output.shape[0], output.shape[1])
     start_x, start_y = cuda.grid(2)
@@ -181,11 +183,12 @@ def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spect
 
             p = mandelbrot_pixel(c, max_iters)
             if p != 0:
+                p += spectrum_offset
                 for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
                     output[i, j, k] = c
             else:
                 for k in range(3):
-                    output[i, j, k] = 0
+                    output[i, j, k] = inset_color[k]
 
 mp.dps = 200
 
@@ -247,6 +250,7 @@ class MandelbrotVoyage(Tk):
         self.custom_coefficient = 0
         self.custom_blur_sigma = 0
         self.custom_brightness = 0
+        self.custom_spectrum_offset = 0
 
         self.preview = np.empty((215, 215, 3), dtype=np.uint8)
         self.preview_gpu = cuda.to_device(self.preview)
@@ -390,18 +394,56 @@ class MandelbrotVoyage(Tk):
                                     self.entryconfig(6, state=NORMAL, value=self.brightness.get())
                                 self.brightness.set(self.brightness.get() * 10e+3)
                                 Config(self.root, self, "color complexity", self.brightness, brightness * 10e+3, 27.5 * 10e+3, 10e+3, True, (iteration_coefficient, blur_sigma, None, spectrum_offset), apply)
+                        
+                        class offsetMenu(Menu):
+                            def __init__(self, master: menuBar):
+                                super().__init__(master, tearoff=0)
+                                self.root = self.master.master.master
+                                self.offset = IntVar(value=0)
 
+                                self.add_radiobutton(label="Black", value=0, variable=self.offset, command=self.change_offset)
+                                self.add_radiobutton(label="Red", value=256, variable=self.offset, command=self.change_offset)
+                                self.add_radiobutton(label="Green", value=768, variable=self.offset, command=self.change_offset)
+                                self.add_radiobutton(label="Blue", value=1280, variable=self.offset, command=self.change_offset)
+                                self.add_separator()
+                                self.add_radiobutton(label="Custom", value=self.root.custom_spectrum_offset, variable=self.offset, command=self.change_offset, state=DISABLED)
+                                self.add_command(label="Fine tune", command=self.fine_tune)
+                        
+                            def change_offset(self):
+                                global spectrum_offset
+                                spectrum_offset = int(self.offset.get() / brightness)
+                                self.root.update_image()
+
+                            def fine_tune(self):
+                                def apply():
+                                    global spectrum_offset
+                                    self.offset.set(self.offset.get() * brightness)
+                                    self.change_offset()
+                                    self.root.custom_spectrum_offset = spectrum_offset
+                                    self.entryconfig(5, state=NORMAL, value=self.offset.get())
+                                Config(self.root, self, "color spectrum offset", self.offset, spectrum_offset, 0, (len(spectrum) + len(initial_spectrum)) / brightness, False, (iteration_coefficient, blur_sigma, brightness, None), apply)
+                        
                         self.iterMenu = iterMenu(self)
                         self.blurMenu = blurMenu(self)
                         self.brightness = brightnessMenu(self)
-
-                        self.spectrum_offset_var = IntVar(value=0)
+                        self.spectrum_offset = offsetMenu(self)
 
                         self.add_cascade(label="Iteration count", menu=self.iterMenu)
                         self.add_cascade(label="Bluriness", menu=self.blurMenu)
                         self.add_cascade(label="Color complexity", menu=self.brightness)
+                        self.add_cascade(label="Color spectrum offset", menu=self.spectrum_offset)
+                        self.add_separator()
+                        self.add_command(label="Change in-set color", command=self.change_inset_color)
                         self.add_separator()
                         self.add_checkbutton(label="Load low resolution first", variable=self.root.use_lod)
+                    
+                    def change_inset_color(self):
+                        global inset_color
+                        c = colorchooser.Chooser(self.root, initialcolor=tuple(inset_color), parent=self.root, title="Choose the in-set color").show()[0]
+                        if c:
+                            for i in range(3):
+                                inset_color[i] = c[i]
+                            self.root.update_image()
 
                 class zoomMenu(Menu):
                     def __init__(self, master: menuBar):
@@ -541,7 +583,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         for i in range(int(fc)):
             #if floor(log10(abs((4.5 / self.zoom)))) <= 13:
             if True:
-                mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+                mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
                 self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
             else:
                 num_threads = 16
@@ -751,7 +793,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         video = Video(self)
 
     def load_lod(self):
-        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
@@ -764,7 +806,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.changeLocationUI.reVar.set(("%.100f" % float(self.center[0]))[:102])
             self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
         except: pass
-        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset)
+        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
         self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
