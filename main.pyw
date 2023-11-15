@@ -423,10 +423,29 @@ class MandelbrotVoyage(Tk):
                                     self.entryconfig(5, state=NORMAL, value=self.offset.get())
                                 Config(self.root, self, "color spectrum offset", self.offset, spectrum_offset, 0, (len(spectrum) + len(initial_spectrum)) / brightness, False, (iteration_coefficient, blur_sigma, brightness, None), apply)
                         
+                        class showMenu(Menu):
+                            def __init__(self, master: menuBar):
+                                super().__init__(master, tearoff=0)
+                                self.root = self.master.master.master
+                                self.coords = IntVar(value=1)
+                                self.zoom = IntVar(value=1)
+                                self.iteration_count = IntVar(value=0)
+                                
+                                self.add_checkbutton(label="Coordinates", variable=self.coords, command=self.update)
+                                self.add_checkbutton(label="Zoom", variable=self.zoom, command=self.update)
+                                self.add_checkbutton(label="Iteration count", variable=self.iteration_count, command=self.update)
+                            
+                            def update(self):
+                                global show_coordinates, show_zoom, show_iteration_count
+                                show_coordinates, show_zoom, show_iteration_count = bool(self.coords.get()), bool(self.zoom.get()), bool(self.iteration_count.get())
+                                self.root.update_image()
+                        
                         self.iterMenu = iterMenu(self)
                         self.blurMenu = blurMenu(self)
                         self.brightness = brightnessMenu(self)
                         self.spectrum_offset = offsetMenu(self)
+
+                        self.showMenu = showMenu(self)
 
                         self.add_cascade(label="Iteration count", menu=self.iterMenu)
                         self.add_cascade(label="Bluriness", menu=self.blurMenu)
@@ -434,6 +453,8 @@ class MandelbrotVoyage(Tk):
                         self.add_cascade(label="Color spectrum offset", menu=self.spectrum_offset)
                         self.add_separator()
                         self.add_command(label="Change in-set color", command=self.change_inset_color)
+                        self.add_separator()
+                        self.add_cascade(label="Show...", menu=self.showMenu)
                         self.add_separator()
                         self.add_checkbutton(label="Load low resolution first", variable=self.root.use_lod)
                     
@@ -813,10 +834,10 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
-        self.ax.text(-2.5, 2, ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}\n" +
-                                  f"{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}\n") if show_coordinates else '') +
-                                 (f"{'' * 6}Zoom:  {(4.5 / self.zoom):e}\n" if show_zoom else '') +
-                                 (f"Iterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else ''),
+        self.ax.text(-2.5, 2, ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
+                                  f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
+                                 (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
+                                 (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else ''),
                      color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
 
