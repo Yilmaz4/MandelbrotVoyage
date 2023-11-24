@@ -20,7 +20,7 @@ import pickle, re
 import moviepy.video.io.ImageSequenceClip
 import time
 
-initial_iteration_count = 80
+initial_iteration_count = 100
 inset_color = np.array([0, 0, 0])
 
 iteration_coefficient = 0.96
@@ -28,10 +28,9 @@ blur_sigma = 0.0
 brightness = 6
 spectrum_offset = 0
 
-
 zoom_coefficient = 0.9
-spss_factor = 2
-interpolation_method = "bilinear"
+spss_factor = 4
+interpolation_method = "bicubic"
 
 show_coordinates = True
 show_zoom = True
@@ -41,6 +40,8 @@ last_computation = time.time_ns()
 
 g1, g2 = 10, 10
 b1, b2 = 20, 20
+
+lod_res = 600
 
 s = time.time()
 spectrum = []
@@ -156,7 +157,7 @@ class Config(Toplevel):
     
     def update_preview(self):
         self.applyButton.configure(state=DISABLED if self.var.get() == self.def_value else NORMAL)
-        mandelbrot_kernel[(g1, g2), (b1, b2)](self.root.zoom, np.array([float(x) for x in self.root.center]), self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset, inset_color)
+        mandelbrot_kernel[(g1, g2), (b1, b2)](self.root.zoom, np.array([float(x) for x in self.root.center]), self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset, inset_color, self.root.smooth_coloring.get())
         self.root.preview_gpu.copy_to_host(self.root.preview)
         self.ax.clear()
         self.ax.imshow(gaussian_filter(self.root.preview, sigma=self.blur_sigma / 10e+3), extent=[-2.5, 1.5, -2, 2])
@@ -165,24 +166,107 @@ class Config(Toplevel):
     def on_exit(self):
         self.destroy()
 
+class Color(Frame):
+    def __init__(self, master: Toplevel, n: int, color: tuple = None, pos: int = 0, state: bool = False):
+        super().__init__(master)
+        self.var = BooleanVar(value=state)
+        self.pos = IntVar(value=pos * 10e+6)
+        self.master = master
+        self.n = n
+        self.color = color if color is not None else (0, 0, 0)
+
+        self.checkbutton = Checkbutton(self, variable=self.var, command=self.on_checkbutton, takefocus=0)
+        self.scale = Scale(self, variable=self.pos, from_=0, to=10e+6, orient=HORIZONTAL, state=NORMAL)
+        self.selectColor = Button(self, text="Color...", takefocus=0)
+        self.remove = Button(self, text="X", width=3, takefocus=0, command=self.delete)
+
+        self.pos.trace_add('write', lambda *args, **kwargs: self.on_scale_update())
+
+        self.checkbutton.place(x=0, y=2)
+        self.scale.place(x=30, y=0, width=302)
+        self.selectColor.place(x=340, y=0)
+        self.remove.place(x=420, y=0)
+
+    def on_scale_update(self):
+        self.master.positions[self.n] = self.pos.get() / 10e+6
+        self.master.update_palette()
+    
+    def on_checkbutton(self):
+        pass
+
+    def delete(self):
+        self.master.colors = np.delete(self.master.colors, self.n)
+        self.master.positions = np.delete(self.master.positions, self.n)
+        self.master.update_palette()
+        self.destroy()
+
 class PaletteEditor(Toplevel):
-    def __init__(self, master: Tk, ):
+    def __init__(self, master: Tk, canvas: np.ndarray):
         super().__init__(master)
         self.root = master
 
         self.wm_title("Palette Editor")
-        w = 352
-        h = 300 
+        w = 467
+        h = 300
         x = self.master.winfo_x()
         y = self.master.winfo_y()
         self.wm_geometry("%dx%d+%d+%d" % (w, h, x + 100, y + 100))
         self.wm_resizable(height=False, width=False)
+
+        self.colors = np.array([[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255], [0, 0, 0]])
+        self.positions = np.array([0.0, 0.25, 0.5, 1.0, 1.0])
+        self.length = IntVar(value=1792)
+
+        self.interpolated_colors = self.interpolate_color(self.colors, self.positions, self.length.get())
+
+        self.fig = Figure()
+        self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        self.ax = self.fig.add_subplot(111, aspect=1)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().place(x=40, y=10, height=20, width=302)
+        self.ax.imshow(self.interpolated_colors.reshape(1, -1, 3).astype(np.uint8), aspect='auto', extent=[0, 1, 0, 1])
+
+        Color(self, 1, self.colors[1], self.positions[1], 1).place(x=10, y=39, height=50, width=457)
+        Color(self, 2, self.colors[2], self.positions[2], 1).place(x=10, y=74, height=50, width=457)
+        Color(self, 3, self.colors[3], self.positions[3], 1).place(x=10, y=109, height=50, width=457)
+
+        self.controls = Frame(self)
+        self.addColor = Button(self.controls, text="Add", command=self.add_color)
 
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
 
         self.focus_force()
         self.transient(master)
         self.mainloop()
+
+    def add_color(self):
+        self.colors += None
+    
+    def update_palette(self):
+        sorted_indices = np.argsort(self.positions)
+        self.interpolated_colors = self.interpolate_color(self.colors[sorted_indices], self.positions[sorted_indices], self.length.get())
+        self.ax.clear()
+        self.ax.imshow(self.interpolated_colors.reshape(1, -1, 3).astype(np.uint8), aspect='auto', extent=[0, 1, 0, 1])
+        self.canvas.draw()
+
+    @staticmethod
+    def interpolate_color(colors, positions, length):
+        t = np.linspace(0, 1, length)
+        interpolated_colors = np.zeros((length, 3))
+
+        for i in range(len(colors) - 1):
+            sc = colors[i]
+            ec = colors[i + 1]
+            sp = positions[i]
+            ep = positions[i + 1]
+
+            mask = (t >= sp) & (t <= ep)
+            segment_t = (t[mask] - sp) / (ep - sp)
+
+            interpolated_colors[mask] = (1 - segment_t[:, np.newaxis]) * sc + segment_t[:, np.newaxis] * ec
+
+        return interpolated_colors
 
     def on_exit(self):
         self.destroy()
@@ -284,10 +368,6 @@ def mandelbrot_pixel(c, max_iters):
     return 0
 
 @cuda.jit(device=True)
-def linear_interpolate(color1, color2, t):
-    return (1 - t) * color1 + t * color2
-
-@cuda.jit(device=True)
 def mandelbrot_pixel_normalized(c, max_iters):
     z: complex = c
     for i in range(max_iters):
@@ -299,7 +379,8 @@ def mandelbrot_pixel_normalized(c, max_iters):
     return 0
 
 @cuda.jit
-def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spectrum, brightness, spectrum_offset, inset_color):
+def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spectrum, brightness, spectrum_offset, inset_color, smooth_coloring):
+    
     max_iters = initial_iteration_count / (coefficient ** (log(zoom / 4.5) / log(zoom_coefficient)))
     pixel_size = zoom / min(output.shape[0], output.shape[1])
     start_x, start_y = cuda.grid(2)
@@ -311,11 +392,7 @@ def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spect
 
     for i in range(start_x, output.shape[0], grid_x):
         for j in range(start_y, output.shape[1], grid_y):
-            imag = (i * pixel_size + y_offset)
-            real = (j * pixel_size + x_offset)
-            c = complex(real, imag)
-
-            p = mandelbrot_pixel_normalized(c, max_iters)
+            p = mandelbrot_pixel(complex((i * pixel_size + y_offset), (j * pixel_size + x_offset)), max_iters)
             if p != 0:
                 p += spectrum_offset
 
@@ -336,7 +413,7 @@ def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spect
                     color2 = spectrum[index2]
 
                 for k in range(3):
-                    output[i, j, k] = linear_interpolate(color1[k], color2[k], t)
+                    output[i, j, k] = (1 - t) * color1[k] + t * color2[k]
             else:
                 # Use initial_spectrum for pixels inside the set
                 for k in range(3):
@@ -371,6 +448,8 @@ class MandelbrotVoyage(Tk):
 
         self.subpixel_supersampling = IntVar(value=0)
         self.smooth_coloring = IntVar(value=1)
+        self.dynamic_resolution = IntVar(value=0)
+        self.use_lod = IntVar(value=0)
 
         self.preview = np.empty((215, 215, 3), dtype=np.uint8)
         self.preview_gpu = cuda.to_device(self.preview)
@@ -378,10 +457,10 @@ class MandelbrotVoyage(Tk):
         self.rgb_colors = np.empty((int(self.height * (spss_factor if self.subpixel_supersampling.get() else 1)), int(self.width * (spss_factor if self.subpixel_supersampling.get() else 1)), 3), dtype=np.uint8)
         self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
-        self.rgb_colors_lod = np.empty((int(200 * self.height / self.width), 200, 3), dtype=np.uint8)
+        self.rgb_colors_lod = np.empty((int(lod_res * self.height / self.width), lod_res, 3), dtype=np.uint8)
         self.rgb_colors_lod_gpu = cuda.to_device(self.rgb_colors_lod)
 
-        self.update_image()
+        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2], interpolation=interpolation_method)
 
         self.load_image = None
 
@@ -395,8 +474,6 @@ class MandelbrotVoyage(Tk):
 
         self.alertLabel = tkinter.Label(self, bg="black", fg="red",
             text="Higher Precision Required - Use \"Render with CPU\"")
-
-        self.use_lod = BooleanVar(value=False)
 
         self.dragging = False
         self.double_click = False
@@ -431,7 +508,7 @@ class MandelbrotVoyage(Tk):
                             def __init__(self, master: menuBar):
                                 super().__init__(master, tearoff=0)
                                 self.root = self.master.master.master
-                                self.iter = DoubleVar(value=0.96)
+                                self.iter = DoubleVar(value=9600000)
 
                                 self.add_radiobutton(label="Very low", value=9850000, variable=self.iter, command=self.change_iteration_count)
                                 self.add_radiobutton(label="Low", value=9700000, variable=self.iter, command=self.change_iteration_count)
@@ -459,7 +536,7 @@ class MandelbrotVoyage(Tk):
                             def __init__(self, master: menuBar):
                                 super().__init__(master, tearoff=0)
                                 self.root = self.master.master.master
-                                self.blur = DoubleVar(value=0.96)
+                                self.blur = DoubleVar(value=5000)
 
                                 self.add_radiobutton(label="Disabled", value=0, variable=self.blur, command=self.change_blur_sigma)
                                 self.add_separator()
@@ -490,7 +567,7 @@ class MandelbrotVoyage(Tk):
                             def __init__(self, master: menuBar):
                                 super().__init__(master, tearoff=0)
                                 self.root = self.master.master.master
-                                self.brightness = DoubleVar(value=0.96)
+                                self.brightness = DoubleVar(value=50000)
 
                                 self.add_radiobutton(label="Very low", value=19000, variable=self.brightness, command=self.change_brightness)
                                 self.add_radiobutton(label="Low", value=37500, variable=self.brightness, command=self.change_brightness)
@@ -569,8 +646,7 @@ class MandelbrotVoyage(Tk):
 
                         self.add_cascade(label="Iteration count", menu=self.iterMenu)
                         self.add_cascade(label="Bluriness", menu=self.blurMenu)
-                        self.add_cascade(label="Color complexity", menu=self.brightness)
-                        self.add_cascade(label="Color spectrum offset", menu=self.spectrum_offset)
+                        
                         self.add_separator()
                         self.add_command(label="Change in-set color", command=self.change_inset_color)
                         self.add_separator()
@@ -579,7 +655,10 @@ class MandelbrotVoyage(Tk):
                         self.add_checkbutton(label="Subpixel Supersampling (SSAA)", variable=self.root.subpixel_supersampling, command=self.root.adjust_for_resize)
                         self.add_checkbutton(label="Continuous (smooth) coloring")
                         self.add_separator()
-                        self.add_checkbutton(label="Load low resolution first", variable=self.root.use_lod)
+                        self.add_cascade(label="Palette complexity", menu=self.brightness)
+                        self.add_cascade(label="Offset", menu=self.spectrum_offset)
+                        self.add_command(label="Palette Editor", command=self.launch_palette_editor)
+                        
                     
                     def change_inset_color(self):
                         global inset_color
@@ -588,6 +667,9 @@ class MandelbrotVoyage(Tk):
                             for i in range(3):
                                 inset_color[i] = c[i]
                             self.root.update_image()
+
+                    def launch_palette_editor(self):
+                        PaletteEditor(self.root, self.root.rgb_colors)
 
                 class zoomMenu(Menu):
                     def __init__(self, master: menuBar):
@@ -610,16 +692,33 @@ class MandelbrotVoyage(Tk):
                         self.add_command(label="Reset location", command=self.root.reset_loc)
                         self.add_separator()
                         self.add_command(label="Change location", command=self.root.change_loc)
-                
+
+                class performanceMenu(Menu):
+                    def __init__(self, master: menuBar):
+                        super().__init__(master, tearoff=0)
+                        self.root = self.master.master
+
+                        self.add_checkbutton(label="Load low resolution first", variable=self.root.use_lod, command=self.change_lod)
+                        self.add_checkbutton(label="Dynamic resolution", variable=self.root.dynamic_resolution, command=self.change_ds)
+                    
+                    def change_lod(self):
+                        self.entryconfig(1, state=NORMAL if self.root.use_lod.get() else DISABLED)
+                    def change_ds(self):
+                        global lod_res
+                        if not self.root.dynamic_resolution.get():
+                            lod_res = 400
+
                 self.fileMenu = fileMenu(self)
                 self.settingsMenu = settingsMenu(self)
                 self.zoomMenu = zoomMenu(self)
                 self.locationMenu = locationMenu(self)
+                self.performanceMenu = performanceMenu(self)
 
                 self.add_cascade(label = "File", menu=self.fileMenu)
                 self.add_cascade(label = "Edit", menu=self.settingsMenu)
                 self.add_cascade(label = "Zoom", menu=self.zoomMenu)
                 self.add_cascade(label = "Location", menu=self.locationMenu)
+                self.add_cascade(label = "Performance", menu=self.performanceMenu)
                 self.add_command(label = "About", command=self.about)
 
             def about(self):
@@ -649,6 +748,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.menuBar = menuBar(self)
         self.config(menu = self.menuBar)
 
+        self.fps_history = [] # last 25 fps values recorded
+
         self.bind("e", lambda _: self.zoom_(+1))
         self.bind("q", lambda _: self.zoom_(-1))
         self.bind("r", lambda _: self.reset_zoom())
@@ -657,6 +758,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
 
         self.wm_protocol("WM_DELETE_WINDOW", self.on_close)
 
+        self.adjust_size_task = None
         self.bind("<Configure>", self.on_resize)
 
     def on_close(self):
@@ -672,6 +774,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.resize = self.after(100, self.adjust_for_resize)
 
     def adjust_for_resize(self):
+        if self.adjust_size_task:
+            self.after_cancel(self.adjust_size_task)
         self.resize = None
         self.canvas.get_tk_widget().place_forget()
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
@@ -679,11 +783,13 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.rgb_colors = np.empty((int(self.height * (spss_factor if self.subpixel_supersampling.get() else 1)), int(self.width* (spss_factor if self.subpixel_supersampling.get() else 1)), 3), dtype=np.uint8)
         self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
-        self.rgb_colors_lod = np.empty((int(200 * self.height / self.width), 200, 3), dtype=np.uint8)
+        self.rgb_colors_lod = np.empty((int(lod_res * self.height / self.width), lod_res, 3), dtype=np.uint8)
         self.rgb_colors_lod_gpu = cuda.to_device(self.rgb_colors_lod)
 
         self.ax.set_aspect(self.height / self.width)
-        self.update_image()
+        self.load_lod()
+        self.adjust_size_task = self.after(200, self.update_image)
+        self.adjust_size_task = None
 
     def render_video(self, config: Toplevel):
         config.rendering = True
@@ -725,7 +831,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
         for i in range(int(fc)):
-            mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
+            mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
             self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
 
             self.ax.clear()
@@ -917,13 +1023,36 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         video = Video(self)
 
     def load_lod(self):
-        mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
+        global lod_res
+        try:
+            self.changeLocationUI.reVar.set(("%.100f" % float(self.center[0]))[:102])
+            self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
+        except: pass
+        last_computation = time.time_ns()
+        mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
-        self.ax.imshow(self.rgb_colors_lod, extent=[-2.5, 1.5, -2, 2])
+        self.ax.imshow(self.rgb_colors_lod, extent=[-2.5, 1.5, -2, 2], interpolation="bilinear")
         self.ax.set_aspect(self.height / self.width)
+        coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
+        fps = 1 / ((time.time_ns() - last_computation) / 10e+8)
+        self.ax.text(-2.5, 2, ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
+                                  f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
+                                 (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
+                                 (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
+                                 (f"\nFPS: {fps}"),
+                     color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
+        if self.dynamic_resolution.get():
+            if sum(self.fps_history[-5:]) / 5 - fps < 10 or fps < 4:
+                x = int(18.33 * fps - 133.33)
+                lod_res = x if x > 60 else 60 if x < 600 else 600
+                self.rgb_colors_lod = np.empty((int(lod_res * self.height / self.width), lod_res, 3), dtype=np.uint8)
+                self.rgb_colors_lod_gpu = cuda.to_device(self.rgb_colors_lod)
+            self.fps_history.append(fps)
+            if len(self.fps_history) > 25:
+                self.fps_history.pop(0)
 
     def update_image(self):
         try:
@@ -931,7 +1060,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
         except: pass
         last_computation = time.time_ns()
-        mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
+        mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
         self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
