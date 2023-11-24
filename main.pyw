@@ -9,31 +9,38 @@ from matplotlib.figure import Figure
 from numba import cuda
 from datetime import datetime
 from math import *
-from mpmath import mpf, mp, mpc
+from mpmath import mpf, mp
 from scipy.ndimage import gaussian_filter
 from typing import *
 
 import matplotlib.pyplot as plt
 import numpy as np
 import nvidia_smi, tkinter, tempfile, os
-import pickle, re, concurrent.futures
+import pickle, re
 import moviepy.video.io.ImageSequenceClip
 import time
 
 initial_iteration_count = 80
+inset_color = np.array([0, 0, 0])
 
 iteration_coefficient = 0.96
 blur_sigma = 0.0
 brightness = 6
 spectrum_offset = 0
-inset_color = np.array([0, 0, 0])
+
 
 zoom_coefficient = 0.9
+spss_factor = 2
+interpolation_method = "bilinear"
 
 show_coordinates = True
 show_zoom = True
 show_iteration_count = False
 
+last_computation = time.time_ns()
+
+g1, g2 = 10, 10
+b1, b2 = 20, 20
 
 s = time.time()
 spectrum = []
@@ -65,6 +72,9 @@ for i in range(256):
     initial_spectrum.append(np.array([i, 0, 0]))
 initial_spectrum = np.array(initial_spectrum)
 initial_spectrum_gpu = cuda.to_device(initial_spectrum)
+
+subpixels = [0.0, 0.0, 0.0]
+subpixels_gpu = cuda.to_device(subpixels)
 
 nvidia_smi.nvmlInit()
 
@@ -146,7 +156,7 @@ class Config(Toplevel):
     
     def update_preview(self):
         self.applyButton.configure(state=DISABLED if self.var.get() == self.def_value else NORMAL)
-        mandelbrot_kernel[(5, 5), (32, 32)](self.root.zoom, np.array([float(x) for x in self.root.center]), self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset, inset_color)
+        mandelbrot_kernel[(g1, g2), (b1, b2)](self.root.zoom, np.array([float(x) for x in self.root.center]), self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset, inset_color)
         self.root.preview_gpu.copy_to_host(self.root.preview)
         self.ax.clear()
         self.ax.imshow(gaussian_filter(self.root.preview, sigma=self.blur_sigma / 10e+3), extent=[-2.5, 1.5, -2, 2])
@@ -155,12 +165,136 @@ class Config(Toplevel):
     def on_exit(self):
         self.destroy()
 
+class PaletteEditor(Toplevel):
+    def __init__(self, master: Tk, ):
+        super().__init__(master)
+        self.root = master
+
+        self.wm_title("Palette Editor")
+        w = 352
+        h = 300 
+        x = self.master.winfo_x()
+        y = self.master.winfo_y()
+        self.wm_geometry("%dx%d+%d+%d" % (w, h, x + 100, y + 100))
+        self.wm_resizable(height=False, width=False)
+
+        self.protocol("WM_DELETE_WINDOW", self.on_exit)
+
+        self.focus_force()
+        self.transient(master)
+        self.mainloop()
+
+    def on_exit(self):
+        self.destroy()
+
+@cuda.jit
+def nearest_neighbor_gpu(data, new_data, height_ratio, width_ratio):
+    h, w, c = new_data.shape
+    old_h, old_w, _ = data.shape
+    
+    x, y = cuda.grid(2)
+    
+    if x < w and y < h:
+        ix = int(x * width_ratio)
+        iy = int(y * height_ratio)
+        
+        for i in range(c):
+            new_data[y, x, i] = data[min(iy, old_h - 1), min(ix, old_w - 1), i]
+
+@cuda.jit
+def bilinear_interpolation_gpu(data, new_data, height_ratio, width_ratio):
+    # Get the dimensions of the new_data array
+    h, w, c = new_data.shape
+    
+    # Get the dimensions of the original data array
+    old_h, old_w, _ = data.shape
+    
+    # Get the global thread indices
+    x, y = cuda.grid(2)
+    
+    if x < w and y < h:
+        # Calculate the corresponding position in the original data
+        px = x * width_ratio
+        py = y * height_ratio
+        
+        # Nearest neighbors
+        ix = int(px)
+        iy = int(py)
+        
+        # Bilinear interpolation
+        fx = px - ix
+        fy = py - iy
+        
+        if 0 <= ix < old_w - 1 and 0 <= iy < old_h - 1:
+            for i in range(c):
+                # Perform bilinear interpolation calculation for each channel
+                new_data[y, x, i] = (
+                    (1 - fx) * (1 - fy) * data[iy, ix, i] +
+                    fx * (1 - fy) * data[iy, ix + 1, i] +
+                    (1 - fx) * fy * data[iy + 1, ix, i] +
+                    fx * fy * data[iy + 1, ix + 1, i]
+                )
+
+@cuda.jit
+def bicubic_interpolation_gpu(data, new_data, height_ratio, width_ratio):
+    h, w, c = new_data.shape
+    old_h, old_w, _ = data.shape
+    
+    x, y = cuda.grid(2)
+    
+    if x < w and y < h:
+        px = x * width_ratio
+        py = y * height_ratio
+        
+        ix = int(px)
+        iy = int(py)
+        
+        dx = px - ix
+        dy = py - iy
+        
+        def _bicubic_coefficient(x):
+            x = abs(x)
+            if x <= 1:
+                return 1.5 * x**3 - 2.5 * x**2 + 1
+            elif 1 < x < 2:
+                return -0.5 * x**3 + 2.5 * x**2 - 4 * x + 2
+            else:
+                return 0
+        
+        for i in range(c):
+            if 1 <= ix < old_w - 2 and 1 <= iy < old_h - 2:
+                interpolated_value = 0.0
+                for j in range(-1, 3):
+                    for k in range(-1, 3):
+                        weight_x = _bicubic_coefficient(dx - k)
+                        weight_y = _bicubic_coefficient(dy - j)
+                        interpolated_value += data[iy + j, ix + k, i] * weight_x * weight_y
+                
+                new_data[y, x, i] = max(0, min(255, int(interpolated_value)))
+            else:
+                new_data[y, x, i] = 0  # Set to zero or any default value for out-of-bounds pixels
+
 @cuda.jit(device=True)
 def mandelbrot_pixel(c, max_iters):
     z: complex = c
     for i in range(max_iters):
         if (z.real ** 2 + z.imag ** 2) >= 4:
             return i if z != c else 1
+        z = z * z + c
+    return 0
+
+@cuda.jit(device=True)
+def linear_interpolate(color1, color2, t):
+    return (1 - t) * color1 + t * color2
+
+@cuda.jit(device=True)
+def mandelbrot_pixel_normalized(c, max_iters):
+    z: complex = c
+    for i in range(max_iters):
+        if (z.real ** 2 + z.imag ** 2) >= 4:
+            log_zn = log(z.real ** 2 + z.imag ** 2) / 2
+            nu = log(log_zn / log(2)) / log(2)
+            return i + 1 - nu if i < max_iters - 1 else 1
         z = z * z + c
     return 0
 
@@ -181,51 +315,34 @@ def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spect
             real = (j * pixel_size + x_offset)
             c = complex(real, imag)
 
-            p = mandelbrot_pixel(c, max_iters)
+            p = mandelbrot_pixel_normalized(c, max_iters)
             if p != 0:
                 p += spectrum_offset
-                for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
-                    output[i, j, k] = c
-            else:
+
+                # Use bilinear interpolation
+                t = p * brightness
+                if t < 255:
+                    index1 = int(t) % len(initial_spectrum)
+                    index2 = (index1 + 1) % len(initial_spectrum)
+                    t = t % 1
+                    color1 = initial_spectrum[index1]
+                    color2 = initial_spectrum[index2]
+                else:
+                    t -= 255
+                    index1 = int(t) % len(spectrum)
+                    index2 = (index1 + 1) % len(spectrum)
+                    t = t % 1
+                    color1 = spectrum[index1]
+                    color2 = spectrum[index2]
+
                 for k in range(3):
-                    output[i, j, k] = inset_color[k]
+                    output[i, j, k] = linear_interpolate(color1[k], color2[k], t)
+            else:
+                # Use initial_spectrum for pixels inside the set
+                for k in range(3):
+                    output[i, j, k] = float(inset_color[k])  # Convert to float
 
 mp.dps = 200
-
-def mandelbrot_pixel_cpu(c, max_iters):
-    z = c
-    for i in range(max_iters):
-        if abs(z) >= 2:
-            return i
-        z = z * z + c
-    return 0
-
-def calculate_mandelbrot_row(args):
-    row, zoom, center, coefficient, spectrum, initial_spectrum, h, w, brightness = args
-    max_iters = initial_iteration_count / (coefficient ** (log(zoom / 4.5) / log(zoom_coefficient)))
-    image_row = np.empty((1, w, 3), dtype=np.uint8)
-
-    pixel_size = mpf(zoom) / mpf(min(h, w))
-    x_center, y_center = center
-    x_offset = x_center - w / 2 * pixel_size
-    y_offset = y_center - h / 2 * pixel_size
-
-    for j in range(w):
-        imag = mpf(row * pixel_size + y_offset)
-        real = mpf(j * pixel_size + x_offset)
-        c = mpc(real, imag)
-
-        p = mandelbrot_pixel_cpu(c, int(max_iters))
-        for c, k in zip(spectrum[(p * brightness - 255) % len(spectrum)] if p * brightness >= 256 else initial_spectrum[(p * brightness)], range(3)):
-            image_row[0, j, k] = c
-    return row, image_row
-
-def calculate_mandelbrot_rows(args):
-    start_row, end_row, zoom, center, h, w = args
-    results = []
-    for row in range(start_row, end_row):
-        results.append(calculate_mandelbrot_row((row, zoom, center, iteration_coefficient, spectrum, initial_spectrum, h, w, brightness))[1])
-    return start_row, results
 
 class MandelbrotVoyage(Tk):
     def __init__(self):
@@ -252,10 +369,13 @@ class MandelbrotVoyage(Tk):
         self.custom_brightness = 0
         self.custom_spectrum_offset = 0
 
+        self.subpixel_supersampling = IntVar(value=0)
+        self.smooth_coloring = IntVar(value=1)
+
         self.preview = np.empty((215, 215, 3), dtype=np.uint8)
         self.preview_gpu = cuda.to_device(self.preview)
-
-        self.rgb_colors = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        
+        self.rgb_colors = np.empty((int(self.height * (spss_factor if self.subpixel_supersampling.get() else 1)), int(self.width * (spss_factor if self.subpixel_supersampling.get() else 1)), 3), dtype=np.uint8)
         self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
         self.rgb_colors_lod = np.empty((int(200 * self.height / self.width), 200, 3), dtype=np.uint8)
@@ -456,6 +576,9 @@ class MandelbrotVoyage(Tk):
                         self.add_separator()
                         self.add_cascade(label="Show...", menu=self.showMenu)
                         self.add_separator()
+                        self.add_checkbutton(label="Subpixel Supersampling (SSAA)", variable=self.root.subpixel_supersampling, command=self.root.adjust_for_resize)
+                        self.add_checkbutton(label="Continuous (smooth) coloring")
+                        self.add_separator()
                         self.add_checkbutton(label="Load low resolution first", variable=self.root.use_lod)
                     
                     def change_inset_color(self):
@@ -553,7 +676,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.canvas.get_tk_widget().place_forget()
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
 
-        self.rgb_colors = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        self.rgb_colors = np.empty((int(self.height * (spss_factor if self.subpixel_supersampling.get() else 1)), int(self.width* (spss_factor if self.subpixel_supersampling.get() else 1)), 3), dtype=np.uint8)
         self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
         self.rgb_colors_lod = np.empty((int(200 * self.height / self.width), 200, 3), dtype=np.uint8)
@@ -602,31 +725,11 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
         for i in range(int(fc)):
-            #if floor(log10(abs((4.5 / self.zoom)))) <= 13:
-            if True:
-                mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
-                self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
-            else:
-                num_threads = 16
-                rows_per_thread = self.rgb_colors.shape[0] // num_threads
-                extra_rows = self.rgb_colors.shape[0] % num_threads
-
-                with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
-                    futures = []
-                    for i in range(num_threads):
-                        start_row = i * rows_per_thread
-                        if i < extra_rows:
-                            rows_for_thread = rows_per_thread + 1
-                        else:
-                            rows_for_thread = rows_per_thread
-
-                        end_row = start_row + rows_for_thread
-                        futures.append(executor.submit(self.calculate_mandelbrot_rows, start_row, end_row))
-
-                    concurrent.futures.wait(futures)
+            mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
+            self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
 
             self.ax.clear()
-            self.ax.imshow(gaussian_filter(self.rgb_colors, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2])
+            self.ax.imshow(gaussian_filter(self.rgb_colors, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2], interpolation=interpolation_method)
             self.canvas.draw()
 
             plt.imsave(tempfolder + f'\\{i}.png', gaussian_filter(self.rgb_colors, sigma=blur_sigma))
@@ -814,7 +917,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         video = Video(self)
 
     def load_lod(self):
-        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
+        mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
@@ -827,17 +930,19 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.changeLocationUI.reVar.set(("%.100f" % float(self.center[0]))[:102])
             self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
         except: pass
-        mandelbrot_kernel[(5, 5), (32, 32)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
+        last_computation = time.time_ns()
+        mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color)
         self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
-        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
+        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2], interpolation=interpolation_method)
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
         self.ax.text(-2.5, 2, ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
                                   f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
                                  (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
-                                 (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else ''),
+                                 (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
+                                 (f"\nFPS: {1 / ((time.time_ns() - last_computation) / 10e+8)}"),
                      color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
 
@@ -943,6 +1048,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         else:
             self.zoom /= zoom_coefficient
 
+        
+
         if floor(log10(abs((4.5 / self.zoom)))) >= 13:
             self.alertLabel.pack_configure(side="top", pady=10)
         else:
@@ -953,6 +1060,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.load_image = self.after(1000, self.update_image)
         else:
             self.update_image()
+
+        
 
     def reset_zoom(self):
         self.zoom = 4.5
@@ -979,7 +1088,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.dragging = False
             self.last_x, self.last_y = None, None
 
-    def _on_mouse_move(self, event):
+    def _on_mouse_move(self, event: tkinter.Event):
         if self.dragging:
             if self.load_image:
                 self.after_cancel(self.load_image)
