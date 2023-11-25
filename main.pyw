@@ -5,6 +5,8 @@ from tkinter.ttk import *
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.backend_bases import MouseButton
+from matplotlib.animation import FuncAnimation
 
 from numba import cuda
 from datetime import datetime
@@ -12,6 +14,7 @@ from math import *
 from mpmath import mpf, mp
 from scipy.ndimage import gaussian_filter
 from typing import *
+from threading import Thread
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -25,7 +28,7 @@ inset_color = np.array([0, 0, 0])
 
 iteration_coefficient = 0.96
 blur_sigma = 0.0
-brightness = 6
+brightness = 5
 spectrum_offset = 0
 
 zoom_coefficient = 0.9
@@ -173,11 +176,11 @@ class Color(Frame):
         self.pos = IntVar(value=pos * 10e+6)
         self.master = master
         self.n = n
-        self.color = color if color is not None else (0, 0, 0)
+        self.color = color if color is not None else [0, 0, 0]
 
         self.checkbutton = Checkbutton(self, variable=self.var, command=self.on_checkbutton, takefocus=0)
         self.scale = Scale(self, variable=self.pos, from_=0, to=10e+6, orient=HORIZONTAL, state=NORMAL)
-        self.selectColor = Button(self, text="Color...", takefocus=0)
+        self.selectColor = Button(self, text="Color...", takefocus=0, command=self.pick_color)
         self.remove = Button(self, text="X", width=3, takefocus=0, command=self.delete)
 
         self.pos.trace_add('write', lambda *args, **kwargs: self.on_scale_update())
@@ -186,38 +189,56 @@ class Color(Frame):
         self.scale.place(x=30, y=0, width=302)
         self.selectColor.place(x=340, y=0)
         self.remove.place(x=420, y=0)
+    
+    def pick_color(self):
+        c = colorchooser.Chooser(self.root, initialcolor=tuple(inset_color), parent=self.root, title="Pick a color").show()[0]
+        if c:
+            for i in range(3):
+                self.color[i] = c[i]
+            self.root.update_image()
 
     def on_scale_update(self):
-        self.master.positions[self.n] = self.pos.get() / 10e+6
         self.master.update_palette()
     
     def on_checkbutton(self):
         pass
 
     def delete(self):
-        self.master.colors = np.delete(self.master.colors, self.n)
-        self.master.positions = np.delete(self.master.positions, self.n)
-        self.master.update_palette()
+        for i in range(self.n, len(self.master.colors)):
+            c: Color = self.master.colors[i]
+            c.n = c.n - 1
+            x, y = c.winfo_x(), c.winfo_y()
+            print(x, y)
+            c.place_configure(x=x, y=y-35)
+        self.master.controls.place_configure(x=self.master.controls.winfo_x(), y=self.master.controls.winfo_y() - 35)
+        self.master.colors = np.delete(self.master.colors, self.n - 1)
         self.destroy()
+        self.master.update_palette()
 
 class PaletteEditor(Toplevel):
-    def __init__(self, master: Tk, canvas: np.ndarray):
+    def __init__(self, master: Tk):
         super().__init__(master)
-        self.root = master
+        self.root: MandelbrotVoyage = master
 
         self.wm_title("Palette Editor")
         w = 467
-        h = 300
+        h = 700
         x = self.master.winfo_x()
         y = self.master.winfo_y()
         self.wm_geometry("%dx%d+%d+%d" % (w, h, x + 100, y + 100))
         self.wm_resizable(height=False, width=False)
 
-        self.colors = np.array([[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255], [0, 0, 0]])
-        self.positions = np.array([0.0, 0.25, 0.5, 1.0, 1.0])
         self.length = IntVar(value=1792)
+        self.colors = []
 
-        self.interpolated_colors = self.interpolate_color(self.colors, self.positions, self.length.get())
+        self.colors.append(Color(self, 1, [255, 0, 0], 0.0, True))
+        self.colors.append(Color(self, 2, [255, 255, 0], 0.2, True))
+        self.colors.append(Color(self, 3, [0, 255, 0], 0.4, True))
+        self.colors.append(Color(self, 4, [0, 255, 255], 0.6, True))
+        self.colors.append(Color(self, 5, [0, 0, 255], 0.8, True))
+        self.colors.append(Color(self, 6, [255, 0, 255], 1.0, True))
+
+        self.interpolated_colors = self.interpolate_color(np.array([x.color for x in self.colors]), np.array([x.pos.get() / 10e+6 for x in self.colors]), self.length.get())
 
         self.fig = Figure()
         self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
@@ -227,12 +248,28 @@ class PaletteEditor(Toplevel):
         self.canvas.get_tk_widget().place(x=40, y=10, height=20, width=302)
         self.ax.imshow(self.interpolated_colors.reshape(1, -1, 3).astype(np.uint8), aspect='auto', extent=[0, 1, 0, 1])
 
-        Color(self, 1, self.colors[1], self.positions[1], 1).place(x=10, y=39, height=50, width=457)
-        Color(self, 2, self.colors[2], self.positions[2], 1).place(x=10, y=74, height=50, width=457)
-        Color(self, 3, self.colors[3], self.positions[3], 1).place(x=10, y=109, height=50, width=457)
+        for c, y in zip(self.colors, range(39, 40 + len(self.colors) * 35, 35)):
+            c.place(x=10, y=y, height=50, width=457)
 
         self.controls = Frame(self)
-        self.addColor = Button(self.controls, text="Add", command=self.add_color)
+        self.addColor = Button(self.controls, text="Add", width=15, command=self.add_color)
+        self.addColor.place(x=0, y=5)
+
+        self.fig2 = Figure()
+        self.fig2.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        self.ax2 = self.fig2.add_subplot(111, aspect=1)
+        self.canvas2 = FigureCanvasTkAgg(self.fig2, master=self.controls)
+        self.canvas2.draw()
+        self.canvas2.get_tk_widget().place(x=212, y=25, height=235, width=215)
+        if self.root.subpixel_supersampling.get():
+            self.ax2.imshow(gaussian_filter(self.root.rgb_colors, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2])
+        else:
+            mandelbrot_kernel[(g1, g2), (b1, b2)](self.root.zoom, np.array([float(x) for x in self.root.center]), zoom_coefficient, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.root.smooth_coloring.get())
+            self.root.preview_gpu.copy_to_host(self.root.preview)
+            self.ax2.imshow(gaussian_filter(self.root.preview, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2])
+        Label(self.controls, text="Preview:").place(x=230, y=0)
+
+        self.controls.place(x=10, y=238, height=245, width=457)
 
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
 
@@ -244,14 +281,22 @@ class PaletteEditor(Toplevel):
         self.colors += None
     
     def update_palette(self):
-        sorted_indices = np.argsort(self.positions)
-        self.interpolated_colors = self.interpolate_color(self.colors[sorted_indices], self.positions[sorted_indices], self.length.get())
+        sorted_indices = np.argsort([x.pos.get() / 10e+6 for x in self.colors])
+        self.interpolated_colors = self.interpolate_color(np.array([x.color for x in self.colors])[sorted_indices], np.array([x.pos.get() / 10e+6 for x in self.colors])[sorted_indices], self.length.get())
         self.ax.clear()
         self.ax.imshow(self.interpolated_colors.reshape(1, -1, 3).astype(np.uint8), aspect='auto', extent=[0, 1, 0, 1])
         self.canvas.draw()
 
     @staticmethod
-    def interpolate_color(colors, positions, length):
+    def interpolate_color(colors: list[list[int]], positions: list[float], length):
+        colors = list(colors)
+        positions = list(positions)
+        # add black colors to the edges
+        colors.insert(0, [0, 0, 0])
+        colors.append([0, 0, 0])
+        positions.insert(0, 0.0)
+        positions.append(1.0)
+
         t = np.linspace(0, 1, length)
         interpolated_colors = np.zeros((length, 3))
 
@@ -272,7 +317,7 @@ class PaletteEditor(Toplevel):
         self.destroy()
 
 @cuda.jit
-def nearest_neighbor_gpu(data, new_data, height_ratio, width_ratio):
+def bicubic_interpolation_gpu(data, new_data, height_ratio, width_ratio):
     h, w, c = new_data.shape
     old_h, old_w, _ = data.shape
     
@@ -284,79 +329,6 @@ def nearest_neighbor_gpu(data, new_data, height_ratio, width_ratio):
         
         for i in range(c):
             new_data[y, x, i] = data[min(iy, old_h - 1), min(ix, old_w - 1), i]
-
-@cuda.jit
-def bilinear_interpolation_gpu(data, new_data, height_ratio, width_ratio):
-    # Get the dimensions of the new_data array
-    h, w, c = new_data.shape
-    
-    # Get the dimensions of the original data array
-    old_h, old_w, _ = data.shape
-    
-    # Get the global thread indices
-    x, y = cuda.grid(2)
-    
-    if x < w and y < h:
-        # Calculate the corresponding position in the original data
-        px = x * width_ratio
-        py = y * height_ratio
-        
-        # Nearest neighbors
-        ix = int(px)
-        iy = int(py)
-        
-        # Bilinear interpolation
-        fx = px - ix
-        fy = py - iy
-        
-        if 0 <= ix < old_w - 1 and 0 <= iy < old_h - 1:
-            for i in range(c):
-                # Perform bilinear interpolation calculation for each channel
-                new_data[y, x, i] = (
-                    (1 - fx) * (1 - fy) * data[iy, ix, i] +
-                    fx * (1 - fy) * data[iy, ix + 1, i] +
-                    (1 - fx) * fy * data[iy + 1, ix, i] +
-                    fx * fy * data[iy + 1, ix + 1, i]
-                )
-
-@cuda.jit
-def bicubic_interpolation_gpu(data, new_data, height_ratio, width_ratio):
-    h, w, c = new_data.shape
-    old_h, old_w, _ = data.shape
-    
-    x, y = cuda.grid(2)
-    
-    if x < w and y < h:
-        px = x * width_ratio
-        py = y * height_ratio
-        
-        ix = int(px)
-        iy = int(py)
-        
-        dx = px - ix
-        dy = py - iy
-        
-        def _bicubic_coefficient(x):
-            x = abs(x)
-            if x <= 1:
-                return 1.5 * x**3 - 2.5 * x**2 + 1
-            elif 1 < x < 2:
-                return -0.5 * x**3 + 2.5 * x**2 - 4 * x + 2
-            else:
-                return 0
-        
-        for i in range(c):
-            if 1 <= ix < old_w - 2 and 1 <= iy < old_h - 2:
-                interpolated_value = 0.0
-                for j in range(-1, 3):
-                    for k in range(-1, 3):
-                        weight_x = _bicubic_coefficient(dx - k)
-                        weight_y = _bicubic_coefficient(dy - j)
-                        interpolated_value += data[iy + j, ix + k, i] * weight_x * weight_y
-                
-                new_data[y, x, i] = max(0, min(255, int(interpolated_value)))
-            else:
-                new_data[y, x, i] = 0  # Set to zero or any default value for out-of-bounds pixels
 
 @cuda.jit(device=True)
 def mandelbrot_pixel(c, max_iters):
@@ -370,17 +342,16 @@ def mandelbrot_pixel(c, max_iters):
 @cuda.jit(device=True)
 def mandelbrot_pixel_normalized(c, max_iters):
     z: complex = c
+    boundry = 15 if z.real ** 2 + z.imag ** 2 >= 4 else 4
     for i in range(max_iters):
-        if (z.real ** 2 + z.imag ** 2) >= 4:
-            log_zn = log(z.real ** 2 + z.imag ** 2) / 2
-            nu = log(log_zn / log(2)) / log(2)
-            return i + 1 - nu if i < max_iters - 1 else 1
+        if (z.real ** 2 + z.imag ** 2) >= boundry:
+            smooth_value = i + 1 - log2(log2(abs(z)))
+            return smooth_value
         z = z * z + c
-    return 0
+    return 0.0
 
 @cuda.jit
 def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spectrum, brightness, spectrum_offset, inset_color, smooth_coloring):
-    
     max_iters = initial_iteration_count / (coefficient ** (log(zoom / 4.5) / log(zoom_coefficient)))
     pixel_size = zoom / min(output.shape[0], output.shape[1])
     start_x, start_y = cuda.grid(2)
@@ -392,11 +363,12 @@ def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spect
 
     for i in range(start_x, output.shape[0], grid_x):
         for j in range(start_y, output.shape[1], grid_y):
-            p = mandelbrot_pixel(complex((i * pixel_size + y_offset), (j * pixel_size + x_offset)), max_iters)
-            if p != 0:
+            c = complex((j * pixel_size + x_offset), (i * pixel_size + y_offset))
+            p = mandelbrot_pixel_normalized(c, max_iters) if smooth_coloring else mandelbrot_pixel(c, max_iters)
+            if p != 0.0:
                 p += spectrum_offset
 
-                # Use bilinear interpolation
+                # bilinear interpolation
                 t = p * brightness
                 if t < 255:
                     index1 = int(t) % len(initial_spectrum)
@@ -446,10 +418,10 @@ class MandelbrotVoyage(Tk):
         self.custom_brightness = 0
         self.custom_spectrum_offset = 0
 
-        self.subpixel_supersampling = IntVar(value=0)
+        self.subpixel_supersampling = IntVar(value=1)
         self.smooth_coloring = IntVar(value=1)
-        self.dynamic_resolution = IntVar(value=0)
-        self.use_lod = IntVar(value=0)
+        self.dynamic_resolution = IntVar(value=1)
+        self.use_lod = IntVar(value=1)
 
         self.preview = np.empty((215, 215, 3), dtype=np.uint8)
         self.preview_gpu = cuda.to_device(self.preview)
@@ -476,6 +448,7 @@ class MandelbrotVoyage(Tk):
             text="Higher Precision Required - Use \"Render with CPU\"")
 
         self.dragging = False
+        self.dragging_right = False
         self.double_click = False
         self.resize = None
         self.last_x, self.last_y = None, None
@@ -536,7 +509,7 @@ class MandelbrotVoyage(Tk):
                             def __init__(self, master: menuBar):
                                 super().__init__(master, tearoff=0)
                                 self.root = self.master.master.master
-                                self.blur = DoubleVar(value=5000)
+                                self.blur = DoubleVar(value=0)
 
                                 self.add_radiobutton(label="Disabled", value=0, variable=self.blur, command=self.change_blur_sigma)
                                 self.add_separator()
@@ -590,7 +563,7 @@ class MandelbrotVoyage(Tk):
                                     self.root.custom_brightness = brightness
                                     self.entryconfig(6, state=NORMAL, value=self.brightness.get())
                                 self.brightness.set(self.brightness.get() * 10e+3)
-                                Config(self.root, self, "color complexity", self.brightness, brightness * 10e+3, 27.5 * 10e+3, 10e+3, True, (iteration_coefficient, blur_sigma, None, spectrum_offset), apply)
+                                Config(self.root, self, "color complexity", self.brightness, brightness * 10e+3, 50 * 10e+3, 0.1 * 10e+3, True, (iteration_coefficient, blur_sigma, None, spectrum_offset), apply)
                         
                         class offsetMenu(Menu):
                             def __init__(self, master: menuBar):
@@ -653,12 +626,18 @@ class MandelbrotVoyage(Tk):
                         self.add_cascade(label="Show...", menu=self.showMenu)
                         self.add_separator()
                         self.add_checkbutton(label="Subpixel Supersampling (SSAA)", variable=self.root.subpixel_supersampling, command=self.root.adjust_for_resize)
-                        self.add_checkbutton(label="Continuous (smooth) coloring")
+                        self.add_checkbutton(label="Continuous (smooth) coloring", variable=self.root.smooth_coloring, command=self.update_image)
                         self.add_separator()
                         self.add_cascade(label="Palette complexity", menu=self.brightness)
                         self.add_cascade(label="Offset", menu=self.spectrum_offset)
                         self.add_command(label="Palette Editor", command=self.launch_palette_editor)
-                        
+                    
+                    def update_image(self):
+                        if self.root.use_lod.get():
+                            self.root.load_lod()
+                            self.root.load_image = self.root.after(1000, self.root.update_image)
+                        else:
+                            self.root.update_image()
                     
                     def change_inset_color(self):
                         global inset_color
@@ -669,15 +648,18 @@ class MandelbrotVoyage(Tk):
                             self.root.update_image()
 
                     def launch_palette_editor(self):
-                        PaletteEditor(self.root, self.root.rgb_colors)
+                        PaletteEditor(self.root)
 
                 class zoomMenu(Menu):
                     def __init__(self, master: menuBar):
                         super().__init__(master, tearoff=0)
                         self.root = self.master.master
 
-                        self.add_command(label="Zoom in",  accelerator="E", command=lambda: self.root.zoom_(+1))
-                        self.add_command(label="Zoom out", accelerator="Q", command=lambda: self.root.zoom_(-1))
+                        self.add_command(label="Zoom in",  accelerator="E", command=lambda: self.root.zoom_(+120))
+                        self.add_command(label="Zoom out", accelerator="Q", command=lambda: self.root.zoom_(-120))
+                        self.add_separator()
+                        self.add_command(label="Zoom in X10", command=lambda: self.root.zoom_(+1200))
+                        self.add_command(label="Zoom out X10", command=lambda: self.root.zoom_(-1200))
                         self.add_separator()
                         self.add_command(label="Reset magnification", accelerator="R", command=self.root.reset_zoom)
 
@@ -750,8 +732,13 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
 
         self.fps_history = [] # last 25 fps values recorded
 
-        self.bind("e", lambda _: self.zoom_(+1))
-        self.bind("q", lambda _: self.zoom_(-1))
+        self.pixelinfotext = None
+        
+        self.info_x, self.info_y = None, None
+        self.textmovement = None
+
+        self.bind("e", lambda _: self.zoom_(+120))
+        self.bind("q", lambda _: self.zoom_(-120))
         self.bind("r", lambda _: self.reset_zoom())
         self.bind("<Control_L>s", lambda _: self.save_image())
         self.bind("<F11>", lambda _: self.wm_attributes('-fullscreen', not self.attributes('-fullscreen')))
@@ -1029,7 +1016,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
         except: pass
         last_computation = time.time_ns()
-        mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
+        mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, 0)
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.ax.clear()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
@@ -1037,7 +1024,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
         fps = 1 / ((time.time_ns() - last_computation) / 10e+8)
-        self.ax.text(-2.5, 2, ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
+        self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
                                   f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
                                  (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
                                  (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
@@ -1045,7 +1032,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                      color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
         if self.dynamic_resolution.get():
-            if sum(self.fps_history[-5:]) / 5 - fps < 10 or fps < 4:
+            d = sum(self.fps_history[-5:]) / 5 - fps
+            if (d < 10 and d > 0 or fps < 4) and len(self.fps_history) > 5:
                 x = int(18.33 * fps - 133.33)
                 lod_res = x if x > 60 else 60 if x < 600 else 600
                 self.rgb_colors_lod = np.empty((int(lod_res * self.height / self.width), lod_res, 3), dtype=np.uint8)
@@ -1067,14 +1055,13 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2], interpolation=interpolation_method)
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
-        self.ax.text(-2.5, 2, ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
+        self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
                                   f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
                                  (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
                                  (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
                                  (f"\nFPS: {1 / ((time.time_ns() - last_computation) / 10e+8)}"),
-                     color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
+            color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
-
         self.load_image = None
 
     def save_image(self):
@@ -1092,6 +1079,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             pickle.dump(self.zoom,   file, pickle.HIGHEST_PROTOCOL)
 
     def load_loc(self):
+        if self.load_image:
+            self.after_cancel(self.load_image)
         path = filedialog.askopenfilename(filetypes=[('MV Location File (*.loc)', '*.loc'), ('All types (*.*)', '*.*')], title="Load saved location")
         if not path:
             return
@@ -1099,11 +1088,21 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.center = pickle.load(file).copy()
             self.zoom = pickle.load(file)
 
-        self.update_image()
+        if self.use_lod.get():
+            self.load_lod()
+            self.load_image = self.after(1000, self.update_image)
+        else:
+            self.update_image()
     
     def reset_loc(self):
+        if self.load_image:
+            self.after_cancel(self.load_image)
         self.center = np.array([mpf("-0.4" + "0" * 180), mpf(0)])
-        self.update_image()
+        if self.use_lod.get():
+            self.load_lod()
+            self.load_image = self.after(1000, self.update_image)
+        else:
+            self.update_image()
 
     def change_loc(self):
         class ChangeLocation(Toplevel):
@@ -1146,7 +1145,11 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             def on_apply(self):
                 self.root.center = np.array([mpf(self.reVar.get()), mpf(self.imVar.get())])
                 self.on_entryUpdate()
-                self.root.update_image()
+                if self.root.use_lod.get():
+                    self.root.load_lod()
+                    self.load_image = self.after(1000, self.update_image)
+                else:
+                    self.root.update_image()
                 self.on_close()
             def on_revert(self):
                 self.reVar.set(("%.100f" % float(self.root.center[0]))[:102])
@@ -1162,22 +1165,27 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.changeLocationUI = None
 
     def center_point(self, event):
+        if self.load_image:
+            self.after_cancel(self.load_image)
         pixel_size = self.zoom / min(self.height, self.width)
         self.center[0] -= (self.width  / 2 - event.x) * pixel_size
         self.center[1] += (self.height / 2 - event.y) * pixel_size
 
         # Update the image with the new center
-        self.update_image()
+        if self.use_lod.get():
+            self.load_lod()
+            self.load_image = self.after(1000, self.update_image)
+        else:
+            self.update_image()
 
     def zoom_(self, delta):
         if self.load_image:
             self.after_cancel(self.load_image)
+        print(delta)
         if delta > 0:
-            self.zoom *= zoom_coefficient
+            self.zoom *= zoom_coefficient ** abs(delta / 120)
         else:
-            self.zoom /= zoom_coefficient
-
-        
+            self.zoom /= zoom_coefficient ** abs(delta / 120)
 
         if floor(log10(abs((4.5 / self.zoom)))) >= 13:
             self.alertLabel.pack_configure(side="top", pady=10)
@@ -1190,11 +1198,13 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         else:
             self.update_image()
 
-        
-
     def reset_zoom(self):
         self.zoom = 4.5
-        self.update_image()
+        if self.use_lod.get():
+            self.load_lod()
+            self.load_image = self.after(1000, self.update_image)
+        else:
+            self.update_image()
 
     def _on_mousewheel(self, event):
         self.zoom_(event.delta)
@@ -1203,21 +1213,57 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.double_click = False
     
     def _on_button_press(self, event):
-        if event.button == 1:
-            if self.double_click:
-                self.center_point(event)
-            else:
-                self.double_click = True
-                self.after(500, self.reset_double_click)
-            self.dragging = True
-            self.last_x, self.last_y = event.x, event.y
+        match event.button:
+            case MouseButton.LEFT:
+                if self.double_click:
+                    self.center_point(event)
+                else:
+                    self.double_click = True
+                    self.after(500, self.reset_double_click)
+                self.dragging = True
+                self.last_x, self.last_y = event.x, event.y
+            case MouseButton.RIGHT:
+                self.info_x = [event.x, event.xdata]
+                self.info_y = [event.y, event.ydata]
+                self.dragging_right = True
+                if self.textmovement:
+                    self.textmovement.event_source.stop()
+                    self.textmovement.event_source.callbacks.clear()
+                self.textmovement = FuncAnimation(self.fig, self.update_pixelinfo, interval=10, blit=True)
+
+    def update_pixelinfo(self, *args, **kwargs):
+        pixel_size = self.zoom / min(self.height, self.width)
+        c = complex(self.center[0] - (self.width / 2 - self.info_x[0]) * pixel_size, self.center[1] + (self.height / 2 - self.info_y[0]) * pixel_size)
+        z = c
+        max_iters = int(initial_iteration_count / (zoom_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient))))
+        for i in range(max_iters):
+            if (z.real ** 2 + z.imag ** 2) >= 4:
+                a = i
+                break
+            z = z * z + c
+        else:
+            a = None
+        pos = self.info_x[1] + (10 * (1.5 - (-2.5)) / self.width), self.info_y[1] - (-35 * (1.5 - (-2.5)) / self.height)
+        txt = f"Re: {c.real}\nIm: {c.imag}\nEscape-time: {a if a else 'never'}"
+        if self.pixelinfotext is None:
+            self.pixelinfotext = self.ax.text(*pos, txt,
+                color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
+        else:
+            self.pixelinfotext.set_position(pos)
+            self.pixelinfotext.set_text(txt)
+        return [self.pixelinfotext]
 
     def _on_button_release(self, event):
-        if event.button == 1:
-            self.dragging = False
-            self.last_x, self.last_y = None, None
+        match event.button:
+            case MouseButton.LEFT:
+                self.dragging = False
+                self.last_x, self.last_y = None, None
+            case MouseButton.RIGHT:
+                self.dragging_right = False
+                self.pixelinfotext.remove()
+                self.pixelinfotext = None
 
-    def _on_mouse_move(self, event: tkinter.Event):
+    def _on_mouse_move(self, event):
         if self.dragging:
             if self.load_image:
                 self.after_cancel(self.load_image)
@@ -1233,6 +1279,9 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                     self.load_image = self.after(1000, self.update_image)
                 else:
                     self.update_image()
+        if self.dragging_right:
+            self.info_x = [event.x, event.xdata]
+            self.info_y = [event.y, event.ydata]
 
 if __name__ == "__main__":
     app = MandelbrotVoyage()
