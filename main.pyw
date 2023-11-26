@@ -12,18 +12,19 @@ from numba import cuda
 from datetime import datetime
 from math import *
 from mpmath import mpf, mp
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, zoom
 from typing import *
 from threading import Thread
+from skimage.transform import rescale
 
 import matplotlib.pyplot as plt
 import numpy as np
 import nvidia_smi, tkinter, tempfile, os
 import pickle, re
 import moviepy.video.io.ImageSequenceClip
-import time
+import time, cv2
 
-initial_iteration_count = 100
+initial_iteration_count = 80
 inset_color = np.array([0, 0, 0])
 
 iteration_coefficient = 0.96
@@ -208,7 +209,6 @@ class Color(Frame):
             c: Color = self.master.colors[i]
             c.n = c.n - 1
             x, y = c.winfo_x(), c.winfo_y()
-            print(x, y)
             c.place_configure(x=x, y=y-35)
         self.master.controls.place_configure(x=self.master.controls.winfo_x(), y=self.master.controls.winfo_y() - 35)
         self.master.colors = np.delete(self.master.colors, self.n - 1)
@@ -316,19 +316,46 @@ class PaletteEditor(Toplevel):
     def on_exit(self):
         self.destroy()
 
-@cuda.jit
-def bicubic_interpolation_gpu(data, new_data, height_ratio, width_ratio):
-    h, w, c = new_data.shape
-    old_h, old_w, _ = data.shape
-    
-    x, y = cuda.grid(2)
-    
-    if x < w and y < h:
-        ix = int(x * width_ratio)
-        iy = int(y * height_ratio)
-        
-        for i in range(c):
-            new_data[y, x, i] = data[min(iy, old_h - 1), min(ix, old_w - 1), i]
+@cuda.jit(nopython=True)
+def bicubic_resize(img, new_shape):
+    height, width, _ = img.shape
+    new_height, new_width = new_shape
+
+    output = np.empty((new_height, new_width, 3), dtype=np.uint8)
+
+    for c in range(3):  # Loop over RGB channels
+        for i in range(new_height):
+            for j in range(new_width):
+                y = i * height / new_height
+                x = j * width / new_width
+                y_low = int(y)
+                x_low = int(x)
+
+                a = y - y_low
+                b = x - x_low
+
+                values = np.zeros((4, 4), dtype=img.dtype)
+                for k in range(4):
+                    for l in range(4):
+                        y_idx = y_low - 1 + k
+                        x_idx = x_low - 1 + l
+
+                        y_idx = max(0, min(height - 1, y_idx))
+                        x_idx = max(0, min(width - 1, x_idx))
+
+                        values[k, l] = img[y_idx, x_idx, c]
+
+                output[i, j, c] = bicubic_interpolate(values, a, b)
+    return output
+
+@cuda.jit(nopython=True)
+def bicubic_interpolate(p, a, b):
+    return (
+        p[1, 1] + 0.5 * a * (p[1, 2] - p[1, 0] + a * (2.0 * p[1, 0] - 5.0 * p[1, 1] + 4.0 * p[1, 2] - p[1, 3] + a * (3.0 * (p[1, 1] - p[1, 2]) + p[1, 3] - p[1, 0])))
+        + 0.5 * b * (p[2, 1] - p[0, 1] + a * (2.0 * p[0, 1] - 5.0 * p[1, 1] + 4.0 * p[2, 1] - p[3, 1] + a * (3.0 * (p[1, 1] - p[2, 1]) + p[3, 1] - p[0, 1])))
+        + 0.5 * a * b * (p[2, 2] - p[0, 2] + a * (2.0 * p[0, 2] - 5.0 * p[1, 2] + 4.0 * p[2, 2] - p[3, 2] + a * (3.0 * (p[1, 2] - p[2, 2]) + p[3, 2] - p[0, 2])))
+        + 0.5 * a * b * (p[1, 2] - p[1, 0] + a * (2.0 * p[1, 0] - 5.0 * p[1, 1] + 4.0 * p[1, 2] - p[1, 3] + a * (3.0 * (p[1, 1] - p[1, 2]) + p[1, 3] - p[1, 0])))
+    )
 
 @cuda.jit(device=True)
 def mandelbrot_pixel(c, max_iters):
@@ -397,7 +424,7 @@ class MandelbrotVoyage(Tk):
     def __init__(self):
         super().__init__()
 
-        self.width, self.height = 600, 600
+        self.width, self.height = 600, 620
 
         self.wm_title("Mandelbrot Voyage")
         self.wm_geometry(f"{self.width}x{self.height}")
@@ -409,7 +436,7 @@ class MandelbrotVoyage(Tk):
         self.ax = self.fig.add_subplot(111, aspect=1)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.draw()
-        self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
+        self.canvas.get_tk_widget().place(x=0, y=-20, height=self.height + 20, width=self.width)
         self.center = np.array([mpf("-0.4" + "0" * 180), mpf(0)])
         self.zoom = 4.5
 
@@ -426,7 +453,7 @@ class MandelbrotVoyage(Tk):
         self.preview = np.empty((215, 215, 3), dtype=np.uint8)
         self.preview_gpu = cuda.to_device(self.preview)
         
-        self.rgb_colors = np.empty((int(self.height * (spss_factor if self.subpixel_supersampling.get() else 1)), int(self.width * (spss_factor if self.subpixel_supersampling.get() else 1)), 3), dtype=np.uint8)
+        self.rgb_colors = np.empty((int((self.height + 20) * (spss_factor if self.subpixel_supersampling.get() else 1)), int(self.width * (spss_factor if self.subpixel_supersampling.get() else 1)), 3), dtype=np.uint8)
         self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
         self.rgb_colors_lod = np.empty((int(lod_res * self.height / self.width), lod_res, 3), dtype=np.uint8)
@@ -766,7 +793,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.resize = None
         self.canvas.get_tk_widget().place_forget()
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
-
         self.rgb_colors = np.empty((int(self.height * (spss_factor if self.subpixel_supersampling.get() else 1)), int(self.width* (spss_factor if self.subpixel_supersampling.get() else 1)), 3), dtype=np.uint8)
         self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
@@ -1017,13 +1043,14 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         except: pass
         last_computation = time.time_ns()
         mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, 0)
+        time_elapsed = time.time_ns() - last_computation
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
-        self.ax.clear()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
-        self.ax.imshow(self.rgb_colors_lod, extent=[-2.5, 1.5, -2, 2], interpolation="bilinear")
+        self.ax.clear()
+        self.ax.imshow(self.rgb_colors_lod, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
-        fps = 1 / ((time.time_ns() - last_computation) / 10e+8)
+        fps = 1 / (time_elapsed / 10e+8)
         self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
                                   f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
                                  (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
@@ -1032,10 +1059,10 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                      color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
         if self.dynamic_resolution.get():
-            d = sum(self.fps_history[-5:]) / 5 - fps
+            d = sum(self.fps_history[-3:]) / 3 - fps
             if (d < 10 and d > 0 or fps < 4) and len(self.fps_history) > 5:
                 x = int(18.33 * fps - 133.33)
-                lod_res = x if x > 60 else 60 if x < 600 else 600
+                lod_res = 60 if x < 60 else 600 if x > 600 else x
                 self.rgb_colors_lod = np.empty((int(lod_res * self.height / self.width), lod_res, 3), dtype=np.uint8)
                 self.rgb_colors_lod_gpu = cuda.to_device(self.rgb_colors_lod)
             self.fps_history.append(fps)
@@ -1050,9 +1077,9 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         last_computation = time.time_ns()
         mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
         self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
-        self.ax.clear()
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
-        self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2], interpolation=interpolation_method)
+        self.ax.clear()
+        self.ax.imshow(rescale(self.rgb_colors, 1 / spss_factor, anti_aliasing=True, channel_axis=2, order=5), extent=[-2.5, 1.5, -2, 2], interpolation=interpolation_method)
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
         self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
@@ -1181,7 +1208,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
     def zoom_(self, delta):
         if self.load_image:
             self.after_cancel(self.load_image)
-        print(delta)
         if delta > 0:
             self.zoom *= zoom_coefficient ** abs(delta / 120)
         else:
@@ -1223,6 +1249,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.dragging = True
                 self.last_x, self.last_y = event.x, event.y
             case MouseButton.RIGHT:
+                if self.load_image:
+                    return
                 self.info_x = [event.x, event.xdata]
                 self.info_y = [event.y, event.ydata]
                 self.dragging_right = True
@@ -1258,6 +1286,9 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             case MouseButton.LEFT:
                 self.dragging = False
                 self.last_x, self.last_y = None, None
+                self.ax.draw_artist(self.ax)
+                self.canvas.blit(self.ax.bbox)
+
             case MouseButton.RIGHT:
                 self.dragging_right = False
                 self.pixelinfotext.remove()
