@@ -229,7 +229,7 @@ class PaletteEditor(Toplevel):
 
         self.wm_title("Palette Editor")
         w = 467
-        h = 700
+        h = 450
         x = self.master.winfo_x()
         y = self.master.winfo_y()
         self.wm_geometry("%dx%d+%d+%d" % (w, h, x + 100, y + 100))
@@ -274,7 +274,6 @@ class PaletteEditor(Toplevel):
             mandelbrot_kernel[(g1, g2), (b1, b2)](self.root.zoom, np.array([float(x) for x in self.root.center]), zoom_coefficient, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.root.smooth_coloring.get())
             self.root.preview_gpu.copy_to_host(self.root.preview)
             self.ax2.imshow(gaussian_filter(self.root.preview, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2])
-        Label(self.controls, text="Preview:").place(x=230, y=0)
 
         self.controls.place(x=10, y=438, height=245, width=457)
 
