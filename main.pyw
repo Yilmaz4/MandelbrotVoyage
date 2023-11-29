@@ -83,6 +83,15 @@ subpixels_gpu = cuda.to_device(subpixels)
 
 nvidia_smi.nvmlInit()
 
+def remove_trailing_9s(s: str):
+    n = 0
+    for i, c in enumerate(s[::-1]):
+        if c in ('9', '0'):
+            n += 1
+        elif n > 5:
+            return float(s[:len(s)-i-1])
+    return s
+
 class Config(Toplevel):
     def __init__(self, master: Tk, menu: Menu, name: str, variable: Union[IntVar, DoubleVar], def_value: Union[int, float],
                  min: Union[int, float], max: Union[int, float], preset_labels: bool, default: Tuple[Union[float, int]], apply_func: Callable):
@@ -179,30 +188,28 @@ class Color(Frame):
         self.n = n
         self.color = color if color is not None else [0, 0, 0]
 
-        self.checkbutton = Checkbutton(self, variable=self.var, command=self.on_checkbutton, takefocus=0)
+        self.canvas = Canvas(self, height=10, width=10)
+        self.cbox = self.canvas.create_rectangle(0, 0, 10, 10, fill="#%02x%02x%02x" % tuple(self.color))
         self.scale = Scale(self, variable=self.pos, from_=0, to=10e+6, orient=HORIZONTAL, state=NORMAL)
         self.selectColor = Button(self, text="Color...", takefocus=0, command=self.pick_color)
         self.remove = Button(self, text="X", width=3, takefocus=0, command=self.delete)
 
         self.pos.trace_add('write', lambda *args, **kwargs: self.on_scale_update())
 
-        self.checkbutton.place(x=0, y=2)
+        self.canvas.place(x=0, y=6)
         self.scale.place(x=30, y=0, width=302)
         self.selectColor.place(x=340, y=0)
         self.remove.place(x=420, y=0)
     
     def pick_color(self):
-        c = colorchooser.Chooser(self.root, initialcolor=tuple(inset_color), parent=self.root, title="Pick a color").show()[0]
+        c = colorchooser.Chooser(self, initialcolor=tuple(self.color), parent=self, title="Pick a color").show()[0]
         if c:
             for i in range(3):
                 self.color[i] = c[i]
-            self.root.update_image()
-
+            self.master.update_palette()
+            self.canvas.itemconfig(self.cbox, fill="#%02x%02x%02x" % tuple(self.color))
     def on_scale_update(self):
         self.master.update_palette()
-    
-    def on_checkbutton(self):
-        pass
 
     def delete(self):
         for i in range(self.n, len(self.master.colors)):
@@ -245,10 +252,10 @@ class PaletteEditor(Toplevel):
         self.ax = self.fig.add_subplot(111, aspect=1)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.draw()
-        self.canvas.get_tk_widget().place(x=40, y=10, height=20, width=302)
+        self.canvas.get_tk_widget().place(x=40, y=101, height=20, width=302)
         self.ax.imshow(self.interpolated_colors.reshape(1, -1, 3).astype(np.uint8), aspect='auto', extent=[0, 1, 0, 1])
 
-        for c, y in zip(self.colors, range(39, 40 + len(self.colors) * 35, 35)):
+        for c, y in zip(self.colors, range(139, 140 + len(self.colors) * 35, 35)):
             c.place(x=10, y=y, height=50, width=457)
 
         self.controls = Frame(self)
@@ -258,9 +265,9 @@ class PaletteEditor(Toplevel):
         self.fig2 = Figure()
         self.fig2.subplots_adjust(left=0, right=1, bottom=0, top=1)
         self.ax2 = self.fig2.add_subplot(111, aspect=1)
-        self.canvas2 = FigureCanvasTkAgg(self.fig2, master=self.controls)
+        self.canvas2 = FigureCanvasTkAgg(self.fig2, master=self)
         self.canvas2.draw()
-        self.canvas2.get_tk_widget().place(x=212, y=25, height=235, width=215)
+        self.canvas2.get_tk_widget().place(x=351, y=15, height=106, width=106)
         if self.root.subpixel_supersampling.get():
             self.ax2.imshow(gaussian_filter(self.root.rgb_colors, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2])
         else:
@@ -269,7 +276,7 @@ class PaletteEditor(Toplevel):
             self.ax2.imshow(gaussian_filter(self.root.preview, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2])
         Label(self.controls, text="Preview:").place(x=230, y=0)
 
-        self.controls.place(x=10, y=238, height=245, width=457)
+        self.controls.place(x=10, y=438, height=245, width=457)
 
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
 
@@ -445,7 +452,7 @@ class MandelbrotVoyage(Tk):
         self.custom_brightness = 0
         self.custom_spectrum_offset = 0
 
-        self.subpixel_supersampling = IntVar(value=1)
+        self.subpixel_supersampling = IntVar(value=0)
         self.smooth_coloring = IntVar(value=1)
         self.dynamic_resolution = IntVar(value=1)
         self.use_lod = IntVar(value=1)
@@ -1047,7 +1054,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
         self.ax.clear()
-        self.ax.imshow(self.rgb_colors_lod, extent=[-2.5, 1.5, -2, 2])
+        self.ax.imshow(self.rgb_colors_lod, extent=[-2.5, 1.5, -2, 2], interpolation="bilinear")
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
         fps = 1 / (time_elapsed / 10e+8)
@@ -1079,11 +1086,11 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
         self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
         self.ax.clear()
-        self.ax.imshow(rescale(self.rgb_colors, 1 / spss_factor, anti_aliasing=True, channel_axis=2, order=5), extent=[-2.5, 1.5, -2, 2], interpolation=interpolation_method)
+        self.ax.imshow(rescale(self.rgb_colors, 1 / (spss_factor if self.subpixel_supersampling.get() else 1), anti_aliasing=True, channel_axis=2, order=2), extent=[-2.5, 1.5, -2, 2], interpolation="nearest")
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
-        self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
-                                  f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
+        self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{remove_trailing_9s(str(coords[0]))}" +
+                                  f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{remove_trailing_9s(str(coords[1]))}") if show_coordinates else '') +
                                  (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
                                  (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
                                  (f"\nFPS: {1 / ((time.time_ns() - last_computation) / 10e+8)}"),
@@ -1261,6 +1268,12 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
 
     def update_pixelinfo(self, *args, **kwargs):
         pixel_size = self.zoom / min(self.height, self.width)
+        if not self.dragging_right:
+            try:
+                return self.pixelinfotext,
+            finally:
+                self.textmovement.event_source.stop()
+                self.textmovement.event_source.callbacks.clear()
         c = complex(self.center[0] - (self.width / 2 - self.info_x[0]) * pixel_size, self.center[1] + (self.height / 2 - self.info_y[0]) * pixel_size)
         z = c
         max_iters = int(initial_iteration_count / (zoom_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient))))
@@ -1272,7 +1285,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         else:
             a = None
         pos = self.info_x[1] + (10 * (1.5 - (-2.5)) / self.width), self.info_y[1] - (-35 * (1.5 - (-2.5)) / self.height)
-        txt = f"Re: {c.real}\nIm: {c.imag}\nEscape-time: {a if a else 'never'}"
+        txt = f"Re: {' ' if c.real > 0 else '-'}{remove_trailing_9s(str(abs(c.real)))}\nIm: {' ' if c.imag < 0 else '-'}{remove_trailing_9s(str(abs(c.imag)))}\nEscape-time: {a if a else 'never'}"
         if self.pixelinfotext is None:
             self.pixelinfotext = self.ax.text(*pos, txt,
                 color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
@@ -1291,8 +1304,12 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
 
             case MouseButton.RIGHT:
                 self.dragging_right = False
-                self.pixelinfotext.remove()
-                self.pixelinfotext = None
+                if self.pixelinfotext:
+                    self.pixelinfotext.remove()
+                    self.ax.relim()
+                    self.textmovement.event_source.stop()
+                    self.textmovement.event_source.callbacks.clear()
+                    self.pixelinfotext = None
 
     def _on_mouse_move(self, event):
         if self.dragging:
