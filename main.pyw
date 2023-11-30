@@ -322,47 +322,6 @@ class PaletteEditor(Toplevel):
     def on_exit(self):
         self.destroy()
 
-@cuda.jit(nopython=True)
-def bicubic_resize(img, new_shape):
-    height, width, _ = img.shape
-    new_height, new_width = new_shape
-
-    output = np.empty((new_height, new_width, 3), dtype=np.uint8)
-
-    for c in range(3):  # Loop over RGB channels
-        for i in range(new_height):
-            for j in range(new_width):
-                y = i * height / new_height
-                x = j * width / new_width
-                y_low = int(y)
-                x_low = int(x)
-
-                a = y - y_low
-                b = x - x_low
-
-                values = np.zeros((4, 4), dtype=img.dtype)
-                for k in range(4):
-                    for l in range(4):
-                        y_idx = y_low - 1 + k
-                        x_idx = x_low - 1 + l
-
-                        y_idx = max(0, min(height - 1, y_idx))
-                        x_idx = max(0, min(width - 1, x_idx))
-
-                        values[k, l] = img[y_idx, x_idx, c]
-
-                output[i, j, c] = bicubic_interpolate(values, a, b)
-    return output
-
-@cuda.jit(nopython=True)
-def bicubic_interpolate(p, a, b):
-    return (
-        p[1, 1] + 0.5 * a * (p[1, 2] - p[1, 0] + a * (2.0 * p[1, 0] - 5.0 * p[1, 1] + 4.0 * p[1, 2] - p[1, 3] + a * (3.0 * (p[1, 1] - p[1, 2]) + p[1, 3] - p[1, 0])))
-        + 0.5 * b * (p[2, 1] - p[0, 1] + a * (2.0 * p[0, 1] - 5.0 * p[1, 1] + 4.0 * p[2, 1] - p[3, 1] + a * (3.0 * (p[1, 1] - p[2, 1]) + p[3, 1] - p[0, 1])))
-        + 0.5 * a * b * (p[2, 2] - p[0, 2] + a * (2.0 * p[0, 2] - 5.0 * p[1, 2] + 4.0 * p[2, 2] - p[3, 2] + a * (3.0 * (p[1, 2] - p[2, 2]) + p[3, 2] - p[0, 2])))
-        + 0.5 * a * b * (p[1, 2] - p[1, 0] + a * (2.0 * p[1, 0] - 5.0 * p[1, 1] + 4.0 * p[1, 2] - p[1, 3] + a * (3.0 * (p[1, 1] - p[1, 2]) + p[1, 3] - p[1, 0])))
-    )
-
 @cuda.jit(device=True)
 def mandelbrot_pixel(c, max_iters):
     z: complex = c
@@ -459,8 +418,11 @@ class MandelbrotVoyage(Tk):
         self.preview = np.empty((215, 215, 3), dtype=np.uint8)
         self.preview_gpu = cuda.to_device(self.preview)
         
-        self.rgb_colors = np.empty((int((self.height + 20) * (spss_factor if self.subpixel_supersampling.get() else 1)), int(self.width * (spss_factor if self.subpixel_supersampling.get() else 1)), 3), dtype=np.uint8)
+        self.rgb_colors = np.empty((self.height, self.width, 3), dtype=np.uint8)
         self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
+
+        self.rgb_colors_highres = np.empty((int(self.height * spss_factor), int(self.width * spss_factor), 3), dtype=np.uint8)
+        self.rgb_colors_gpu_highres = cuda.to_device(self.rgb_colors_highres)
 
         self.rgb_colors_lod = np.empty((int(lod_res * self.height / self.width), lod_res, 3), dtype=np.uint8)
         self.rgb_colors_lod_gpu = cuda.to_device(self.rgb_colors_lod)
@@ -799,9 +761,11 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.resize = None
         self.canvas.get_tk_widget().place_forget()
         self.canvas.get_tk_widget().place(x=0, y=0, height=self.height, width=self.width)
-        self.rgb_colors = np.empty((int(self.height * (spss_factor if self.subpixel_supersampling.get() else 1)), int(self.width* (spss_factor if self.subpixel_supersampling.get() else 1)), 3), dtype=np.uint8)
-        self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
 
+        self.rgb_colors = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
+        self.rgb_colors_highres = np.empty((int(self.height * spss_factor), int(self.width * spss_factor), 3), dtype=np.uint8)
+        self.rgb_colors_gpu_highres = cuda.to_device(self.rgb_colors)
         self.rgb_colors_lod = np.empty((int(lod_res * self.height / self.width), lod_res, 3), dtype=np.uint8)
         self.rgb_colors_lod_gpu = cuda.to_device(self.rgb_colors_lod)
 
@@ -1081,11 +1045,16 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
         except: pass
         last_computation = time.time_ns()
-        mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
-        self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
-        self.rgb_colors = gaussian_filter(self.rgb_colors, sigma=blur_sigma)
-        self.ax.clear()
-        self.ax.imshow(rescale(self.rgb_colors, 1 / (spss_factor if self.subpixel_supersampling.get() else 1), anti_aliasing=True, channel_axis=2, order=2), extent=[-2.5, 1.5, -2, 2], interpolation="nearest")
+        if self.subpixel_supersampling.get():
+            mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu_highres, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
+            self.rgb_colors_highres = self.rgb_colors_gpu_highres.copy_to_host()
+            self.ax.clear()
+            self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
+        else:
+            mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
+            self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
+            self.ax.clear()
+            self.ax.imshow(rescale(self.rgb_colors_highres if self.subpixel_supersampling.get() else self.rgb_colors, 1 / (spss_factor if self.subpixel_supersampling.get() else 1), anti_aliasing=True, channel_axis=2, order=2), extent=[-2.5, 1.5, -2, 2], interpolation="nearest")
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
         self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{remove_trailing_9s(str(coords[0]))}" +
@@ -1101,7 +1070,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage %H.%M.%S %d-%m-%y"), defaultextension='.png', filetypes=[('PNG (*.png)', '*.png'), ('JPEG (*.jpg)', '*.jpg')], title="Save the screenshot")
         if not path:
             return
-        plt.imsave(path, self.rgb_colors)
+        plt.imsave(path, self.rgb_colors_highres if self.subpixel_supersampling.get() else self.rgb_colors)
 
     def save_loc(self):
         path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage Location %H.%M.%S %d-%m-%y"), defaultextension='.loc', filetypes=[('MV Location File (*.loc)', '*.loc')], title="Save the current location")
