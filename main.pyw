@@ -765,7 +765,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.rgb_colors = np.empty((self.height, self.width, 3), dtype=np.uint8)
         self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
         self.rgb_colors_highres = np.empty((int(self.height * spss_factor), int(self.width * spss_factor), 3), dtype=np.uint8)
-        self.rgb_colors_gpu_highres = cuda.to_device(self.rgb_colors)
+        self.rgb_colors_gpu_highres = cuda.to_device(self.rgb_colors_highres)
         self.rgb_colors_lod = np.empty((int(lod_res * self.height / self.width), lod_res, 3), dtype=np.uint8)
         self.rgb_colors_lod_gpu = cuda.to_device(self.rgb_colors_lod)
 
@@ -812,16 +812,23 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         if config.h.get() != self.height or config.w.get() != self.width:
             self.rgb_colors = np.empty((config.h.get(), config.w.get(), 3), dtype=np.uint8)
             self.rgb_colors_gpu = cuda.to_device(self.rgb_colors)
+            self.rgb_colors_highres = np.empty((int(config.h.get() * spss_factor), int(config.w.get() * spss_factor), 3), dtype=np.uint8)
+            self.rgb_colors_gpu_highres = cuda.to_device(self.rgb_colors_highres)
 
         for i in range(int(fc)):
-            mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
-            self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
-
-            self.ax.clear()
-            self.ax.imshow(gaussian_filter(self.rgb_colors, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2], interpolation=interpolation_method)
+            if self.subpixel_supersampling.get():
+                mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu_highres, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
+                self.rgb_colors_highres = self.rgb_colors_gpu_highres.copy_to_host()
+                self.ax.clear()
+                self.ax.imshow(rescale(self.rgb_colors_highres if self.subpixel_supersampling.get() else self.rgb_colors, 1 / (spss_factor if self.subpixel_supersampling.get() else 1), anti_aliasing=True, channel_axis=2, order=2), extent=[-2.5, 1.5, -2, 2], interpolation="nearest")
+            else:
+                mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
+                self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
+                self.ax.clear()
+                self.ax.imshow(gaussian_filter(self.rgb_colors, sigma=blur_sigma), extent=[-2.5, 1.5, -2, 2], interpolation=interpolation_method)
             self.canvas.draw()
 
-            plt.imsave(tempfolder + f'\\{i}.png', gaussian_filter(self.rgb_colors, sigma=blur_sigma))
+            plt.imsave(tempfolder + f'\\{i}.png', self.rgb_colors_highres if self.subpixel_supersampling.get() else self.rgb_colors)
             self.zoom *= zoom_coefficient
             config.progressBar.step()
             config.update()
@@ -1020,7 +1027,10 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.ax.imshow(self.rgb_colors_lod, extent=[-2.5, 1.5, -2, 2], interpolation="bilinear")
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
-        fps = 1 / (time_elapsed / 10e+8)
+        try:
+            fps = 1 / (time_elapsed / 10e+8)
+        except ZeroDivisionError: # somehow elapsed time is 0 (this does actually happen)
+            fps = self.fps_history[-1]
         self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
                                   f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
                                  (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
@@ -1040,6 +1050,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.fps_history.pop(0)
 
     def update_image(self):
+        print(self.zoom)
         try:
             self.changeLocationUI.reVar.set(("%.100f" % float(self.center[0]))[:102])
             self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
@@ -1047,21 +1058,27 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         last_computation = time.time_ns()
         if self.subpixel_supersampling.get():
             mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu_highres, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
+            time_elapsed = time.time_ns() - last_computation
             self.rgb_colors_highres = self.rgb_colors_gpu_highres.copy_to_host()
             self.ax.clear()
-            self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
+            self.ax.imshow(rescale(self.rgb_colors_highres if self.subpixel_supersampling.get() else self.rgb_colors, 1 / (spss_factor if self.subpixel_supersampling.get() else 1), anti_aliasing=True, channel_axis=2, order=2), extent=[-2.5, 1.5, -2, 2], interpolation="nearest")
         else:
             mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
+            time_elapsed = time.time_ns() - last_computation
             self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
             self.ax.clear()
-            self.ax.imshow(rescale(self.rgb_colors_highres if self.subpixel_supersampling.get() else self.rgb_colors, 1 / (spss_factor if self.subpixel_supersampling.get() else 1), anti_aliasing=True, channel_axis=2, order=2), extent=[-2.5, 1.5, -2, 2], interpolation="nearest")
+            self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
+        try:
+            fps = 1 / (time_elapsed / 10e+8)
+        except ZeroDivisionError:
+            fps = self.fps_history[-1]
         self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{remove_trailing_9s(str(coords[0]))}" +
                                   f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{remove_trailing_9s(str(coords[1]))}") if show_coordinates else '') +
                                  (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
                                  (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
-                                 (f"\nFPS: {1 / ((time.time_ns() - last_computation) / 10e+8)}"),
+                                 (f"\nFPS: {fps}"),
             color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
         self.load_image = None
