@@ -1,6 +1,5 @@
 from tkinter import *
 from tkinter import filedialog, messagebox, colorchooser
-TkLabel = Label
 from tkinter.ttk import *
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -11,18 +10,17 @@ from matplotlib.animation import FuncAnimation
 from numba import cuda
 from datetime import datetime
 from math import *
-from mpmath import mpf, mp
-from scipy.ndimage import gaussian_filter, zoom
+from scipy.ndimage import gaussian_filter
 from typing import *
-from threading import Thread
 from skimage.transform import rescale
 
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 import nvidia_smi, tkinter, tempfile, os
-import pickle, re
+import pickle, re, time, mpmath
 import moviepy.video.io.ImageSequenceClip
-import time, cv2
+import multiprocessing as mp
 
 initial_iteration_count = 80
 inset_color = np.array([0, 0, 0])
@@ -322,6 +320,10 @@ class PaletteEditor(Toplevel):
     def on_exit(self):
         self.destroy()
 
+def mandelbrot_cpu(rows: npt.NDArray, zoom: int, center: npt.NDArray[mpmath.mpf], pixel_size: mpmath.mpf):
+    for row in rows:
+        ...
+
 @cuda.jit(device=True)
 def mandelbrot_pixel(c, max_iters):
     z: complex = c
@@ -383,7 +385,7 @@ def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spect
                 for k in range(3):
                     output[i, j, k] = float(inset_color[k])  # Convert to float
 
-mp.dps = 200
+mpmath.mp.dps = 200
 
 class MandelbrotVoyage(Tk):
     def __init__(self):
@@ -402,8 +404,8 @@ class MandelbrotVoyage(Tk):
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.draw()
         self.canvas.get_tk_widget().place(x=0, y=-20, height=self.height + 20, width=self.width)
-        self.center = np.array([mpf("-0.4" + "0" * 180), mpf(0)])
-        self.zoom = 4.5
+        self.center = np.array([mpmath.mpf("-0.4" + "0" * 180), mpmath.mpf(0)])
+        self.zoom = mpmath.mpf(4.5)
 
         self.custom_coefficient = 0
         self.custom_blur_sigma = 0
@@ -449,6 +451,24 @@ class MandelbrotVoyage(Tk):
         self.last_x, self.last_y = None, None
 
         self.changeLocationUI = None
+
+        self.fps_history = [] # last 25 fps values recorded
+
+        self.pixelinfotext = None
+        
+        self.info_x, self.info_y = None, None
+        self.textmovement = None
+
+        self.bind("e", lambda _: self.zoom_(+120))
+        self.bind("q", lambda _: self.zoom_(-120))
+        self.bind("r", lambda _: self.reset_zoom())
+        self.bind("<Control_L>s", lambda _: self.save_image())
+        self.bind("<F11>", lambda _: self.wm_attributes('-fullscreen', not self.attributes('-fullscreen')))
+
+        self.wm_protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.adjust_size_task = None
+        self.bind("<Configure>", self.on_resize)
 
         class menuBar(Menu):
             def __init__(self, root: MandelbrotVoyage):
@@ -725,24 +745,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         self.menuBar = menuBar(self)
         self.config(menu = self.menuBar)
 
-        self.fps_history = [] # last 25 fps values recorded
-
-        self.pixelinfotext = None
-        
-        self.info_x, self.info_y = None, None
-        self.textmovement = None
-
-        self.bind("e", lambda _: self.zoom_(+120))
-        self.bind("q", lambda _: self.zoom_(-120))
-        self.bind("r", lambda _: self.reset_zoom())
-        self.bind("<Control_L>s", lambda _: self.save_image())
-        self.bind("<F11>", lambda _: self.wm_attributes('-fullscreen', not self.attributes('-fullscreen')))
-
-        self.wm_protocol("WM_DELETE_WINDOW", self.on_close)
-
-        self.adjust_size_task = None
-        self.bind("<Configure>", self.on_resize)
-
     def on_close(self):
         self.destroy()
         self.quit()
@@ -779,10 +781,10 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         final_zoom = self.zoom
         tempfolder = config.tempFolder.get()
 
-        self.zoom = 4.5
+        self.zoom = mpmath.mpf(4.5)
 
-        fc = mpf(config.duration.get() * config.fps.get())
-        zoom_coefficient = float((final_zoom / mpf(self.zoom)) ** (mpf(1) / fc))
+        fc = mpmath.mpf(config.duration.get() * config.fps.get())
+        zoom_coefficient = float((final_zoom / mpmath.mpf(self.zoom)) ** (mpmath.mpf(1) / fc))
 
         config.progress.set(0)
         config.progressBar.configure(maximum = fc + 1)
@@ -1019,7 +1021,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
         except: pass
         last_computation = time.time_ns()
-        mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, 0)
+        mandelbrot_kernel[(g1, g2), (b1, b2)](float(self.zoom), np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_lod_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, 0)
         time_elapsed = time.time_ns() - last_computation
         self.rgb_colors_lod = self.rgb_colors_lod_gpu.copy_to_host()
         self.rgb_colors_lod = gaussian_filter(self.rgb_colors_lod, sigma=blur_sigma)
@@ -1033,8 +1035,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             fps = self.fps_history[-1]
         self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
                                   f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
-                                 (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
-                                 (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
+                                 (f"\n{'' * 6}Zoom:  {(4.5 / float(self.zoom)):e}" if show_zoom else '') +
+                                 (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(float(self.zoom) / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
                                  (f"\nFPS: {fps}"),
                      color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
@@ -1050,7 +1052,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.fps_history.pop(0)
 
     def update_image(self):
-        print(self.zoom)
         try:
             self.changeLocationUI.reVar.set(("%.100f" % float(self.center[0]))[:102])
             self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
@@ -1063,7 +1064,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.ax.clear()
             self.ax.imshow(rescale(self.rgb_colors_highres if self.subpixel_supersampling.get() else self.rgb_colors, 1 / (spss_factor if self.subpixel_supersampling.get() else 1), anti_aliasing=True, channel_axis=2, order=2), extent=[-2.5, 1.5, -2, 2], interpolation="nearest")
         else:
-            mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
+            mandelbrot_kernel[(g1, g2), (b1, b2)](float(self.zoom), np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
             time_elapsed = time.time_ns() - last_computation
             self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
             self.ax.clear()
@@ -1076,9 +1077,9 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             fps = self.fps_history[-1]
         self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{remove_trailing_9s(str(coords[0]))}" +
                                   f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{remove_trailing_9s(str(coords[1]))}") if show_coordinates else '') +
-                                 (f"\n{'' * 6}Zoom:  {(4.5 / self.zoom):e}" if show_zoom else '') +
-                                 (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
-                                 (f"\nFPS: {fps}"),
+                                 (f"\n{'' * 6}Zoom:  {(4.5 / float(self.zoom)):e}" if show_zoom else '') +
+                                 (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(float(self.zoom) / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
+                                 (f"\n\nUsing CPU for high precision: {0} of {600} rows completed:" if ),
             color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
         self.load_image = None
@@ -1116,7 +1117,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
     def reset_loc(self):
         if self.load_image:
             self.after_cancel(self.load_image)
-        self.center = np.array([mpf("-0.4" + "0" * 180), mpf(0)])
+        self.center = np.array([mpmath.mpf("-0.4" + "0" * 180), mpmath.mpf(0)])
         if self.use_lod.get():
             self.load_lod()
             self.load_image = self.after(1000, self.update_image)
@@ -1162,7 +1163,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.apply.configure(state=s)
                 self.revert.configure(state=s)
             def on_apply(self):
-                self.root.center = np.array([mpf(self.reVar.get()), mpf(self.imVar.get())])
+                self.root.center = np.array([mpmath.mpf(self.reVar.get()), mpmath.mpf(self.imVar.get())])
                 self.on_entryUpdate()
                 if self.root.use_lod.get():
                     self.root.load_lod()
@@ -1205,11 +1206,6 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         else:
             self.zoom /= zoom_coefficient ** abs(delta / 120)
 
-        if floor(log10(abs((4.5 / self.zoom)))) >= 13:
-            self.alertLabel.pack_configure(side="top", pady=10)
-        else:
-            self.alertLabel.pack_forget()
-
         if self.use_lod.get():
             self.load_lod()
             self.load_image = self.after(1000, self.update_image)
@@ -1217,7 +1213,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.update_image()
 
     def reset_zoom(self):
-        self.zoom = 4.5
+        self.zoom = mpmath.mpf(4.5)
         if self.use_lod.get():
             self.load_lod()
             self.load_image = self.after(1000, self.update_image)
