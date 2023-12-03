@@ -13,12 +13,13 @@ from math import *
 from scipy.ndimage import gaussian_filter
 from typing import *
 from skimage.transform import rescale
+from decimal import *
 
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 import nvidia_smi, tkinter, tempfile, os
-import pickle, re, time, mpmath
+import pickle, re, time
 import moviepy.video.io.ImageSequenceClip
 import multiprocessing as mp
 
@@ -27,8 +28,8 @@ inset_color = np.array([0, 0, 0])
 
 iteration_coefficient = 0.96
 blur_sigma = 0.0
-brightness = 5
-spectrum_offset = 0
+brightness = 156703.0 / 10e+3
+spectrum_offset = 12
 
 zoom_coefficient = 0.9
 spss_factor = 4
@@ -162,13 +163,14 @@ class Config(Toplevel):
 
     def apply(self):
         self.variable.set(self.var.get())
+        print(self.variable.get())
         self.applyButton.configure(state=DISABLED)
         self.apply_func()
         self.destroy()
     
     def update_preview(self):
         self.applyButton.configure(state=DISABLED if self.var.get() == self.def_value else NORMAL)
-        mandelbrot_kernel[(g1, g2), (b1, b2)](self.root.zoom, np.array([float(x) for x in self.root.center]), self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset, inset_color, self.root.smooth_coloring.get())
+        mandelbrot_kernel[(g1, g2), (b1, b2)](float(self.root.zoom), np.array([float(x) for x in self.root.center]), self.coefficient / 10e+6, self.root.preview_gpu, spectrum_gpu, initial_spectrum_gpu, int(self.brightness / 10e+3), self.spectrum_offset, inset_color, self.root.smooth_coloring.get())
         self.root.preview_gpu.copy_to_host(self.root.preview)
         self.ax.clear()
         self.ax.imshow(gaussian_filter(self.root.preview, sigma=self.blur_sigma / 10e+3), extent=[-2.5, 1.5, -2, 2])
@@ -320,7 +322,7 @@ class PaletteEditor(Toplevel):
     def on_exit(self):
         self.destroy()
 
-def mandelbrot_cpu(rows: npt.NDArray, zoom: int, center: npt.NDArray[mpmath.mpf], pixel_size: mpmath.mpf):
+def mandelbrot_cpu(rows: npt.NDArray, zoom: int, center: List[Decimal], pixel_size: Decimal):
     for row in rows:
         ...
 
@@ -385,7 +387,7 @@ def mandelbrot_kernel(zoom, center, coefficient, output, spectrum, initial_spect
                 for k in range(3):
                     output[i, j, k] = float(inset_color[k])  # Convert to float
 
-mpmath.mp.dps = 200
+getcontext().prec = 100
 
 class MandelbrotVoyage(Tk):
     def __init__(self):
@@ -404,15 +406,15 @@ class MandelbrotVoyage(Tk):
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.draw()
         self.canvas.get_tk_widget().place(x=0, y=-20, height=self.height + 20, width=self.width)
-        self.center = np.array([mpmath.mpf("-0.4" + "0" * 180), mpmath.mpf(0)])
-        self.zoom = mpmath.mpf(4.5)
+        self.center = [Decimal(-0.4), Decimal(0)]
+        self.zoom = Decimal(4.5)
 
         self.custom_coefficient = 0
         self.custom_blur_sigma = 0
         self.custom_brightness = 0
         self.custom_spectrum_offset = 0
 
-        self.subpixel_supersampling = IntVar(value=0)
+        self.subpixel_supersampling = IntVar(value=1)
         self.smooth_coloring = IntVar(value=1)
         self.dynamic_resolution = IntVar(value=1)
         self.use_lod = IntVar(value=1)
@@ -781,10 +783,10 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         final_zoom = self.zoom
         tempfolder = config.tempFolder.get()
 
-        self.zoom = mpmath.mpf(4.5)
+        self.zoom = Decimal(4.5)
 
-        fc = mpmath.mpf(config.duration.get() * config.fps.get())
-        zoom_coefficient = float((final_zoom / mpmath.mpf(self.zoom)) ** (mpmath.mpf(1) / fc))
+        fc = Decimal(config.duration.get() * config.fps.get())
+        zoom_coefficient = float((final_zoom / Decimal(self.zoom)) ** (Decimal(1) / fc))
 
         config.progress.set(0)
         config.progressBar.configure(maximum = fc + 1)
@@ -1035,10 +1037,10 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             fps = self.fps_history[-1]
         self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
                                   f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
-                                 (f"\n{'' * 6}Zoom:  {(4.5 / float(self.zoom)):e}" if show_zoom else '') +
+                                 (f"\n{'' * 6}Zoom:  {float(Decimal(4.5) / self.zoom):e}" if show_zoom else '') +
                                  (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(float(self.zoom) / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
-                                 (f"\nFPS: {fps}"),
-                     color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
+                                 (f"\n\nUsing CPU for high precision: {0} of {600} rows completed:" if log10(4.5 / float(self.zoom)) > 14 else ''),
+            color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
         if self.dynamic_resolution.get():
             d = sum(self.fps_history[-3:]) / 3 - fps
@@ -1056,33 +1058,42 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.changeLocationUI.reVar.set(("%.100f" % float(self.center[0]))[:102])
             self.changeLocationUI.imVar.set(("%.100f" % float(self.center[1]))[:102])
         except: pass
-        last_computation = time.time_ns()
         if self.subpixel_supersampling.get():
-            mandelbrot_kernel[(g1, g2), (b1, b2)](self.zoom, np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu_highres, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
-            time_elapsed = time.time_ns() - last_computation
+            mandelbrot_kernel[(g1, g2), (b1, b2)](float(self.zoom), np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu_highres, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
             self.rgb_colors_highres = self.rgb_colors_gpu_highres.copy_to_host()
             self.ax.clear()
             self.ax.imshow(rescale(self.rgb_colors_highres if self.subpixel_supersampling.get() else self.rgb_colors, 1 / (spss_factor if self.subpixel_supersampling.get() else 1), anti_aliasing=True, channel_axis=2, order=2), extent=[-2.5, 1.5, -2, 2], interpolation="nearest")
         else:
             mandelbrot_kernel[(g1, g2), (b1, b2)](float(self.zoom), np.array([float(x) for x in self.center]), iteration_coefficient, self.rgb_colors_gpu, spectrum_gpu, initial_spectrum_gpu, brightness, spectrum_offset, inset_color, self.smooth_coloring.get())
-            time_elapsed = time.time_ns() - last_computation
             self.rgb_colors = self.rgb_colors_gpu.copy_to_host()
             self.ax.clear()
             self.ax.imshow(self.rgb_colors, extent=[-2.5, 1.5, -2, 2])
         self.ax.set_aspect(self.height / self.width)
         coords = [str(abs(self.center[0])), str(abs(self.center[1]))]
-        try:
-            fps = 1 / (time_elapsed / 10e+8)
-        except ZeroDivisionError:
-            fps = self.fps_history[-1]
-        self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{remove_trailing_9s(str(coords[0]))}" +
-                                  f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{remove_trailing_9s(str(coords[1]))}") if show_coordinates else '') +
-                                 (f"\n{'' * 6}Zoom:  {(4.5 / float(self.zoom)):e}" if show_zoom else '') +
+        self.ax.text(-2.5 + (5 * (1.5 - (-2.5)) / self.width), 2 - (5 * (1.5 - (-2.5)) / self.height), ((f"{'' * 8}Re: {'-' if self.center[0] < 0 else ' '}{coords[0]}" +
+                                  f"\n{'' * 8}Im: {'-' if self.center[1] < 0 else ' '}{coords[1]}") if show_coordinates else '') +
+                                 (f"\n{'' * 6}Zoom:  {float(Decimal(4.5) / self.zoom):e}" if show_zoom else '') +
                                  (f"\nIterations:  {int(initial_iteration_count / (iteration_coefficient ** (log(float(self.zoom) / 4.5) / log(zoom_coefficient)))):e}" if show_iteration_count else '') +
-                                 (f"\n\nUsing CPU for high precision: {0} of {600} rows completed:" if ),
+                                 (f"\n\nUsing CPU for high precision: {0} of {600} rows completed:" if log10(4.5 / float(self.zoom)) > 14 else ''),
             color="white", fontfamily="monospace", fontweight=10, size=7, bbox=dict(boxstyle='square', facecolor='black', alpha=0.5), horizontalalignment='left', verticalalignment='top')
         self.canvas.draw()
         self.load_image = None
+
+    def update_image_cpu(self):
+        n = mp.cpu_count()
+        rows_per_process = self.rgb_colors.shape[0] / n
+        overflow = n * (rows_per_process - floor(rows_per_process))
+        
+
+        # Create a multiprocessing pool
+        with mp.Pool(n) as pool:
+            # Use the pool to process rows in parallel
+            results = pool.starmap(process_rows, [(rows, data) for rows in row_splits])
+
+        # Combine the results into a 2D array
+        result_array = np.concatenate(results, axis=0)
+
+        return result_array
 
     def save_image(self):
         path = filedialog.asksaveasfilename(initialfile=datetime.now().strftime("Mandelbrot Voyage %H.%M.%S %d-%m-%y"), defaultextension='.png', filetypes=[('PNG (*.png)', '*.png'), ('JPEG (*.jpg)', '*.jpg')], title="Save the screenshot")
@@ -1105,8 +1116,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         if not path:
             return
         with open(path, 'rb') as file:
-            self.center = pickle.load(file).copy()
-            self.zoom = pickle.load(file)
+            self.center = [Decimal(x) for x in pickle.load(file).copy()]
+            self.zoom = Decimal(pickle.load(file))
 
         if self.use_lod.get():
             self.load_lod()
@@ -1117,7 +1128,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
     def reset_loc(self):
         if self.load_image:
             self.after_cancel(self.load_image)
-        self.center = np.array([mpmath.mpf("-0.4" + "0" * 180), mpmath.mpf(0)])
+        self.center = [Decimal(-0.4), Decimal(0)]
         if self.use_lod.get():
             self.load_lod()
             self.load_image = self.after(1000, self.update_image)
@@ -1134,9 +1145,9 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.wm_geometry("770x100")
                 self.wm_resizable(height=False, width=False)
 
-                self.reVar = StringVar(self, value=("%.100f" % float(self.root.center[0]))[:102])
+                self.reVar = StringVar(self, value=("%.200f" % self.root.center[0])[:102])
                 self.tr1 = self.reVar.trace_add('write', lambda *args, **kwargs: self.on_entryUpdate())
-                self.imVar = StringVar(self, value=("%.100f" % float(self.root.center[1]))[:102])
+                self.imVar = StringVar(self, value=("%.200f" % self.root.center[1])[:102])
                 self.tr2 = self.imVar.trace_add('write', lambda *args, **kwargs: self.on_entryUpdate())
 
                 Label(self, text="Re:").place(x=8, y=10)
@@ -1163,7 +1174,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 self.apply.configure(state=s)
                 self.revert.configure(state=s)
             def on_apply(self):
-                self.root.center = np.array([mpmath.mpf(self.reVar.get()), mpmath.mpf(self.imVar.get())])
+                self.root.center = np.array([Decimal(self.reVar.get()), Decimal(self.imVar.get())])
                 self.on_entryUpdate()
                 if self.root.use_lod.get():
                     self.root.load_lod()
@@ -1188,8 +1199,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         if self.load_image:
             self.after_cancel(self.load_image)
         pixel_size = self.zoom / min(self.height, self.width)
-        self.center[0] -= (self.width  / 2 - event.x) * pixel_size
-        self.center[1] += (self.height / 2 - event.y) * pixel_size
+        self.center[0] -= Decimal(self.width  / 2 - event.x) * pixel_size
+        self.center[1] += Decimal(self.height / 2 - event.y) * pixel_size
 
         # Update the image with the new center
         if self.use_lod.get():
@@ -1202,9 +1213,9 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
         if self.load_image:
             self.after_cancel(self.load_image)
         if delta > 0:
-            self.zoom *= zoom_coefficient ** abs(delta / 120)
+            self.zoom *= Decimal(zoom_coefficient ** abs(delta / 120))
         else:
-            self.zoom /= zoom_coefficient ** abs(delta / 120)
+            self.zoom /= Decimal(zoom_coefficient ** abs(delta / 120))
 
         if self.use_lod.get():
             self.load_lod()
@@ -1213,7 +1224,7 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             self.update_image()
 
     def reset_zoom(self):
-        self.zoom = mpmath.mpf(4.5)
+        self.zoom = Decimal(4.5)
         if self.use_lod.get():
             self.load_lod()
             self.load_image = self.after(1000, self.update_image)
@@ -1255,9 +1266,9 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
             finally:
                 self.textmovement.event_source.stop()
                 self.textmovement.event_source.callbacks.clear()
-        c = complex(self.center[0] - (self.width / 2 - self.info_x[0]) * pixel_size, self.center[1] + (self.height / 2 - self.info_y[0]) * pixel_size)
+        c = complex(self.center[0] - Decimal(self.width / 2 - self.info_x[0]) * pixel_size, self.center[1] + Decimal(self.height / 2 - self.info_y[0]) * pixel_size)
         z = c
-        max_iters = int(initial_iteration_count / (zoom_coefficient ** (log(self.zoom / 4.5) / log(zoom_coefficient))))
+        max_iters = int(initial_iteration_count / (Decimal(zoom_coefficient) ** ((self.zoom / Decimal(4.5)).log10() / Decimal(log(zoom_coefficient)))))
         for i in range(max_iters):
             if (z.real ** 2 + z.imag ** 2) >= 4:
                 a = i
@@ -1300,7 +1311,8 @@ the set, mpmath for arbitrary precision, and moviepy for creating videos.""").pl
                 dy = (event.x - self.last_x)
                 dx = (self.last_y - event.y)
                 w, h = self.ax.get_xlim()[1] - self.ax.get_xlim()[0], self.ax.get_ylim()[1] - self.ax.get_ylim()[0]
-                self.center -= np.array([dy / self.fig.get_dpi() / w * self.zoom, dx / self.fig.get_dpi() / h * self.zoom], dtype=np.float64)
+                self.center[0] -= dy / Decimal(self.fig.get_dpi()) / Decimal(w) * self.zoom
+                self.center[1] -= dx / Decimal(self.fig.get_dpi()) / Decimal(h) * self.zoom
                 self.last_x, self.last_y = event.x, event.y
 
                 if self.use_lod.get():
