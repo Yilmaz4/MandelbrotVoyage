@@ -7,6 +7,8 @@ Mandelbrot Voyage is a program written in Python and Tkinter where you can explo
 ## Gallery
 ![Mandelbrot Voyage 23 59 57 07-12-23](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/83303d10-3b54-4480-b553-c87e3f743e56)
 ![Mandelbrot Voyage 00 09 28 08-12-23](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/89f0b3b8-730e-45b7-8206-7b66d263a6be)
+![Mandelbrot Voyage 00 26 08 08-12-23](https://github.com/Yilmaz4/MandelbrotVoyage/assets/77583632/dd102430-1eda-402b-884a-9af63d7b0631)
+
 
 
 
