@@ -338,10 +338,10 @@ def mandelbrot_pixel(c, max_iters):
 @cuda.jit(device=True)
 def mandelbrot_pixel_normalized(c, max_iters):
     z: complex = c
-    boundry = 15 if z.real ** 2 + z.imag ** 2 >= 4 else 4
+    boundry = 15
     for i in range(max_iters):
         if (z.real ** 2 + z.imag ** 2) >= boundry:
-            smooth_value = i + 1 - log2(log2(abs(z)))
+            smooth_value = i + 1 - log2(log2(abs(z))) / log2(2)
             return smooth_value
         z = z * z + c
     return 0.0
